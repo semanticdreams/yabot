@@ -1,0 +1,17 @@
+[project]
+name = "yabot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "appdirs>=1.4.4",
+    "matrix-nio[e2e]>=0.25.2",
+    "openai>=2.15.0",
+    "pynacl>=1.5.0",
+    "python-dotenv>=1.2.1",
+    "tiktoken>=0.12.0",
+]
+
+[project.scripts]
+yabot = "yabot.app:run"
