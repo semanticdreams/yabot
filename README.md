@@ -1,4 +1,4 @@
-# yabot operational notes
+# yabot - yet another bot
 
 ## Running
 
