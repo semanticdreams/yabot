@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 
 from nio import InviteMemberEvent, MegolmEvent, RoomMessage, SyncResponse, UnknownEncryptedEvent
 
@@ -9,6 +10,7 @@ from .checkpoint import FileBackedSaver
 from .handler import BotHandler, StreamRegistry
 from .graph import YabotGraph
 from .llm import LLMClient
+from .skills import load_skills
 from matrix_bot.matrix import MatrixMessenger, auto_trust_devices, login_or_restore
 
 
@@ -36,11 +38,16 @@ async def main() -> None:
         api_key=config.openai_api_key,
     )
     checkpointer = FileBackedSaver(f"{config.data_dir}/graph_state.pkl")
+    builtin_skills_dir = Path(__file__).resolve().parent.parent / "skills"
+    user_skills_dir = Path(config.data_dir) / "skills"
+    user_skills_dir.mkdir(parents=True, exist_ok=True)
+    skills = load_skills([builtin_skills_dir, user_skills_dir])
     graph = YabotGraph(
         llm=llm,
         default_model=config.default_model,
         available_models=config.available_models,
         max_turns=config.max_turns,
+        skills=skills,
         checkpointer=checkpointer,
     )
     handler = BotHandler(

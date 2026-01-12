@@ -4,10 +4,11 @@ import pytest
 
 from yabot.checkpoint import FileBackedSaver
 from yabot.graph import YabotGraph
+from yabot.skills import SkillRegistry
 
 
 class DummyLLM:
-    async def create_message(self, model, messages):
+    async def create_message(self, model, messages, tools=None):
         raise AssertionError("LLM should not be called for commands.")
 
 
@@ -19,6 +20,7 @@ async def test_file_backed_saver_persists_state(tmp_path: Path):
         default_model="gpt-4o-mini",
         available_models=["gpt-4o-mini"],
         max_turns=3,
+        skills=SkillRegistry([]),
         checkpointer=FileBackedSaver(str(path)),
     )
 
@@ -30,6 +32,7 @@ async def test_file_backed_saver_persists_state(tmp_path: Path):
         default_model="gpt-4o-mini",
         available_models=["gpt-4o-mini"],
         max_turns=3,
+        skills=SkillRegistry([]),
         checkpointer=FileBackedSaver(str(path)),
     )
     result2 = await graph2.ainvoke("room1", "!list")

@@ -3,10 +3,11 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from yabot.graph import YabotGraph
+from yabot.skills import SkillRegistry
 
 
 class DummyLLM:
-    async def create_message(self, model, messages):
+    async def create_message(self, model, messages, tools=None):
         raise AssertionError("LLM should not be called for commands.")
 
 
@@ -17,7 +18,7 @@ class EchoLLM:
             self.content = content
             self.tool_calls = []
 
-    async def create_message(self, model, messages):
+    async def create_message(self, model, messages, tools=None):
         return self.Message("ok")
 
 
@@ -28,6 +29,7 @@ async def test_model_command_updates_state():
         default_model="gpt-4o-mini",
         available_models=["gpt-4o-mini", "gpt-5.2"],
         max_turns=3,
+        skills=SkillRegistry([]),
         checkpointer=MemorySaver(),
     )
 
@@ -45,6 +47,7 @@ async def test_new_list_use_reset_flow():
         default_model="gpt-4o-mini",
         available_models=["gpt-4o-mini", "gpt-5.2"],
         max_turns=3,
+        skills=SkillRegistry([]),
         checkpointer=MemorySaver(),
     )
 

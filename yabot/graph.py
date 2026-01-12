@@ -14,7 +14,8 @@ from .commands import (
     trim_messages,
 )
 from .llm import LLMClient
-from .tools import execute_tool
+from .skills import SkillRegistry
+from .tools import TOOLS, execute_tool
 
 
 class GraphState(TypedDict, total=False):
@@ -32,12 +33,16 @@ class YabotGraph:
         default_model: str,
         available_models: List[str],
         max_turns: int,
+        skills: SkillRegistry,
         checkpointer: Any | None = None,
     ) -> None:
         self.llm = llm
         self.default_model = default_model
         self.available_models = list(available_models)
         self.max_turns = max_turns
+        self.skills = skills
+        self.base_tools = list(TOOLS)
+        self.skill_tools = skills.tool_defs()
         self.checkpointer = checkpointer or MemorySaver()
         self.graph = self._build_graph()
 
@@ -135,6 +140,8 @@ class YabotGraph:
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
+            if self.skills.is_skill_tool(name):
+                continue
             raw_args = function.get("arguments") or "{}"
             try:
                 args = json.loads(raw_args)
@@ -154,8 +161,11 @@ class YabotGraph:
 
         return None
 
-    async def _execute_tool_calls(self, tool_calls: List[dict[str, Any]]) -> List[dict[str, Any]]:
+    async def _execute_tool_calls(
+        self, tool_calls: List[dict[str, Any]]
+    ) -> tuple[List[dict[str, Any]], List[dict[str, Any]]]:
         tool_messages: List[dict[str, Any]] = []
+        system_messages: List[dict[str, Any]] = []
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
@@ -165,7 +175,15 @@ class YabotGraph:
             except json.JSONDecodeError as exc:
                 result = f"ERROR: invalid JSON arguments: {exc}"
             else:
-                result = await asyncio.to_thread(execute_tool, name, arguments)
+                if self.skills.is_skill_tool(name):
+                    skill = self.skills.get_by_tool_name(name)
+                    if skill:
+                        system_messages.append({"role": "system", "content": skill.content})
+                        result = f"Skill applied: {skill.name}"
+                    else:
+                        result = f"ERROR: unknown skill tool {name}"
+                else:
+                    result = await asyncio.to_thread(execute_tool, name, arguments)
             tool_messages.append(
                 {
                     "role": "tool",
@@ -173,7 +191,7 @@ class YabotGraph:
                     "content": result,
                 }
             )
-        return tool_messages
+        return tool_messages, system_messages
 
     async def _run_llm_loop(
         self,
@@ -196,7 +214,9 @@ class YabotGraph:
 
         while True:
             if tool_calls is None:
-                message = await self.llm.create_message(model, working_messages)
+                message = await self.llm.create_message(
+                    model, working_messages, tools=self.base_tools + self.skill_tools
+                )
                 assistant_message = self._message_to_dict(message)
                 new_messages.append(assistant_message)
                 working_messages.append(assistant_message)
@@ -211,9 +231,12 @@ class YabotGraph:
                         "tool_calls": tool_calls,
                     }
 
-                tool_messages = await self._execute_tool_calls(tool_calls)
+                tool_messages, system_messages = await self._execute_tool_calls(tool_calls)
                 new_messages.extend(tool_messages)
                 working_messages.extend(tool_messages)
+                if system_messages:
+                    new_messages.extend(system_messages)
+                    working_messages.extend(system_messages)
                 tool_calls = None
                 continue
 

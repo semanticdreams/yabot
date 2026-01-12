@@ -6,6 +6,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from yabot.graph import YabotGraph
+from yabot.skills import SkillRegistry
 
 
 class DummyFunction:
@@ -38,7 +39,7 @@ class DummyLLM:
         self.messages = list(messages)
         self.calls: list[list[dict[str, str]]] = []
 
-    async def create_message(self, model, messages):
+    async def create_message(self, model, messages, tools=None):
         self.calls.append(messages)
         return self.messages.pop(0)
 
@@ -49,7 +50,7 @@ class ValidatingLLM:
         self.final = final
         self.calls = 0
 
-    async def create_message(self, model, messages):
+    async def create_message(self, model, messages, tools=None):
         self.calls += 1
         if self.calls == 1:
             return DummyMessage(tool_calls=[self.tool_call])
@@ -75,6 +76,7 @@ async def test_run_shell_requires_approval_and_remembers(tmp_path: Path):
         default_model="gpt-4o-mini",
         available_models=["gpt-4o-mini"],
         max_turns=3,
+        skills=SkillRegistry([]),
         checkpointer=MemorySaver(),
     )
 
@@ -102,6 +104,7 @@ async def test_run_shell_cancelled_on_non_y(tmp_path: Path):
         default_model="gpt-4o-mini",
         available_models=["gpt-4o-mini"],
         max_turns=3,
+        skills=SkillRegistry([]),
         checkpointer=MemorySaver(),
     )
 
@@ -135,6 +138,7 @@ async def test_fs_tool_approval_scopes_directory(tmp_path: Path):
         default_model="gpt-4o-mini",
         available_models=["gpt-4o-mini"],
         max_turns=3,
+        skills=SkillRegistry([]),
         checkpointer=MemorySaver(),
     )
 
@@ -164,6 +168,7 @@ async def test_tool_messages_follow_tool_calls(tmp_path: Path):
         default_model="gpt-4o-mini",
         available_models=["gpt-4o-mini"],
         max_turns=3,
+        skills=SkillRegistry([]),
         checkpointer=MemorySaver(),
     )
 
