@@ -96,3 +96,35 @@ async def test_skill_tool_injects_system_message():
     assert result["responses"][0] == "done"
     conv = result["conversations"][result["active"]]["messages"]
     assert any(m.get("role") == "system" and "Use the demo approach." in m.get("content", "") for m in conv)
+
+
+@pytest.mark.asyncio
+async def test_ask_user_tool_flow():
+    class AskLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def create_message(self, model, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return DummyMessage(
+                    tool_calls=[DummyToolCall("call-1", "ask_user", json.dumps({"question": "More detail?"}))],
+                )
+            tool_msgs = [m for m in messages if m.get("role") == "tool"]
+            assert tool_msgs and tool_msgs[-1].get("content") == "extra details"
+            return DummyMessage(content="ok")
+
+    graph = YabotGraph(
+        llm=AskLLM(),
+        default_model="gpt-4o-mini",
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        skills=SkillRegistry([]),
+        checkpointer=MemorySaver(),
+    )
+
+    result = await graph.ainvoke("room1", "start")
+    assert result["responses"][0] == "More detail?"
+
+    result = await graph.ainvoke("room1", "extra details")
+    assert result["responses"][0] == "ok"

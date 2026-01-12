@@ -140,7 +140,7 @@ class YabotGraph:
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
-            if self.skills.is_skill_tool(name):
+            if self.skills.is_skill_tool(name) or name == "ask_user":
                 continue
             raw_args = function.get("arguments") or "{}"
             try:
@@ -223,6 +223,21 @@ class YabotGraph:
                 tool_calls = self._tool_calls_to_dicts(getattr(message, "tool_calls", None))
 
             if tool_calls:
+                for call in tool_calls:
+                    function = call.get("function") or {}
+                    name = function.get("name") or ""
+                    if name == "ask_user":
+                        raw_args = function.get("arguments") or "{}"
+                        try:
+                            args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            args = {}
+                        question = str(args.get("question", "")).strip() or "Can you clarify?"
+                        return [question], None, {
+                            "request": {"kind": "ask_user", "tool_call_id": call.get("id", "")},
+                            "assistant": assistant_message,
+                        }
+
                 missing = self._first_missing_approval(state, tool_calls)
                 if missing:
                     return [self._approval_prompt(missing)], None, {
@@ -254,8 +269,37 @@ class YabotGraph:
 
         pending = state["approvals"].get("pending")
         if pending:
-            if incoming.strip().lower() == "y":
-                request = pending.get("request") or {}
+            request = pending.get("request") or {}
+            if request.get("kind") == "ask_user":
+                tool_call_id = request.get("tool_call_id", "")
+                assistant_message = pending.get("assistant")
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": incoming,
+                }
+                state["approvals"]["pending"] = None
+                _, conv = room_active_conv(state)
+                model = conv.get("model", self.default_model)
+                base_messages = list(conv.get("messages", []))
+                if assistant_message:
+                    base_messages.append(assistant_message)
+                base_messages.append(tool_message)
+                responses, new_messages, pending_next = await self._run_llm_loop(
+                    state,
+                    model,
+                    base_messages,
+                )
+                if pending_next:
+                    state["approvals"]["pending"] = pending_next
+                elif new_messages is not None:
+                    conv_messages = list(conv.get("messages", []))
+                    if assistant_message:
+                        conv_messages.append(assistant_message)
+                    conv_messages.append(tool_message)
+                    conv_messages.extend(new_messages)
+                    conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+            elif incoming.strip().lower() == "y":
                 if request.get("kind") == "shell":
                     self._approve_shell(state, request.get("command", ""), request.get("workdir"))
                 elif request.get("kind") == "dir":
