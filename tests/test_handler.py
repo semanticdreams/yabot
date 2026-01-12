@@ -23,7 +23,7 @@ class DummyLLM:
 
     async def respond_streaming(self, messenger, room_id, model, messages):
         self.calls.append((room_id, model, messages))
-        return self.reply
+        return self.reply, [{"role": "assistant", "content": self.reply}]
 
 
 class DummyCommands:

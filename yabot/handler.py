@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import List
+from typing import Any, List
 
 from nio import InviteMemberEvent, MatrixRoom, MegolmEvent, RoomMessage, UnknownEncryptedEvent
 
@@ -12,12 +12,12 @@ from .state import StateStore
 
 class StreamRegistry:
     def __init__(self) -> None:
-        self._active_streams: dict[str, asyncio.Task[str]] = {}
+        self._active_streams: dict[str, asyncio.Task[tuple[str, list[dict[str, Any]]]]] = {}
 
-    def register(self, room_id: str, task: asyncio.Task[str]) -> None:
+    def register(self, room_id: str, task: asyncio.Task[tuple[str, list[dict[str, Any]]]]) -> None:
         self._active_streams[room_id] = task
 
-    def clear(self, room_id: str, task: asyncio.Task[str]) -> None:
+    def clear(self, room_id: str, task: asyncio.Task[tuple[str, list[dict[str, Any]]]]) -> None:
         if self._active_streams.get(room_id) is task:
             self._active_streams.pop(room_id, None)
 
@@ -99,7 +99,7 @@ class BotHandler:
         self.streams.register(room_id, stream_task)
         self.logger.info("Starting LLM response room=%s model=%s", room_id, model)
         try:
-            assistant_text = await stream_task
+            assistant_text, assistant_messages = await stream_task
             self.logger.info("Completed LLM response room=%s", room_id)
         finally:
             self.streams.clear(room_id, stream_task)
@@ -107,7 +107,7 @@ class BotHandler:
         async with self.state.lock:
             _, conv2 = self.state.room_active_conv(room_id)
             conv2_msgs = conv2.get("messages", [])
-            conv2_msgs.append({"role": "assistant", "content": assistant_text})
+            conv2_msgs.extend(assistant_messages)
             conv2["messages"] = self.state.trim_messages(conv2_msgs, model)
 
         await self.state.save()

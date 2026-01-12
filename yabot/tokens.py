@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import tiktoken
 
@@ -29,7 +29,7 @@ def get_encoding(model: str) -> tiktoken.Encoding:
         return tiktoken.get_encoding("cl100k_base")
 
 
-def estimate_message_tokens(message: Dict[str, str], encoding: tiktoken.Encoding) -> int:
+def estimate_message_tokens(message: Dict[str, Any], encoding: tiktoken.Encoding) -> int:
     total = TOKENS_PER_MESSAGE
     for key, value in message.items():
         if value is None:
@@ -40,7 +40,7 @@ def estimate_message_tokens(message: Dict[str, str], encoding: tiktoken.Encoding
     return total
 
 
-def estimate_messages_tokens(messages: List[Dict[str, str]], encoding: tiktoken.Encoding) -> int:
+def estimate_messages_tokens(messages: List[Dict[str, Any]], encoding: tiktoken.Encoding) -> int:
     if not messages:
         return 0
     total = 0
