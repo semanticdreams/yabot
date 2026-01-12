@@ -88,6 +88,12 @@ class MatrixMessenger:
             },
         )
 
+    async def set_typing(self, room_id: str, is_typing: bool, timeout_ms: int = 30000) -> None:
+        try:
+            await self.client.room_typing(room_id, is_typing, timeout_ms if is_typing else 0)
+        except Exception as exc:
+            self.logger.exception("room_typing failed room=%s error=%s", room_id, exc)
+
     async def _send_message(self, room_id: str, content: Dict[str, str]) -> str:
         try:
             resp = await self.client.room_send(

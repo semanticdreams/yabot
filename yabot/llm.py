@@ -38,12 +38,11 @@ class LLMClient:
         model: str,
         messages: List[Dict[str, str]],
     ) -> str:
-        await messenger.send_text(room_id, "⏳ Thinking…")
-
         buf: List[str] = []
         sent_parts: List[str] = []
 
         try:
+            await messenger.set_typing(room_id, True)
             async for piece in self._iter_stream_content(model, messages):
                 buf.append(piece)
                 text = "".join(buf)
@@ -74,3 +73,5 @@ class LLMClient:
             err = f"LLM error: {e}"
             await messenger.send_text(room_id, err)
             return err
+        finally:
+            await messenger.set_typing(room_id, False)
