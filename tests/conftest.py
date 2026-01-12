@@ -1,18 +1,4 @@
-from pathlib import Path
-
 import pytest
-
-from yabot.state import StateStore
-
-
-@pytest.fixture
-def state_store(tmp_path: Path) -> StateStore:
-    return StateStore(
-        state_path=str(tmp_path / "state.json"),
-        default_model="gpt-4o-mini",
-        available_models=["gpt-4o-mini", "gpt-5.2"],
-        max_turns=3,
-    )
 
 
 class DummyClient:
