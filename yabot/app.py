@@ -3,13 +3,13 @@ import logging
 
 from nio import InviteMemberEvent, MegolmEvent, RoomMessage, SyncResponse, UnknownEncryptedEvent
 
-from .commands import CommandProcessor
 from .config import load_config
 from matrix_bot.cross_signing import CrossSigningManager
+from .checkpoint import FileBackedSaver
 from .handler import BotHandler, StreamRegistry
+from .graph import YabotGraph
 from .llm import LLMClient
 from matrix_bot.matrix import MatrixMessenger, auto_trust_devices, login_or_restore
-from .state import StateStore
 
 
 async def main() -> None:
@@ -18,14 +18,6 @@ async def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     config = load_config()
-    state = StateStore(
-        config.state_path,
-        config.default_model,
-        config.available_models,
-        config.max_turns,
-    )
-    await state.load()
-
     client = await login_or_restore(
         config.homeserver,
         config.bot_user,
@@ -43,19 +35,17 @@ async def main() -> None:
     llm = LLMClient(
         api_key=config.openai_api_key,
     )
-    commands = CommandProcessor(
-        state,
-        messenger,
-        config.available_models,
-        config.default_model,
-        streams.stop,
+    checkpointer = FileBackedSaver(f"{config.data_dir}/graph_state.pkl")
+    graph = YabotGraph(
+        llm=llm,
+        default_model=config.default_model,
+        available_models=config.available_models,
+        max_turns=config.max_turns,
+        checkpointer=checkpointer,
     )
     handler = BotHandler(
-        state,
         messenger,
-        llm,
-        commands,
-        config.default_model,
+        graph,
         streams,
         config.allowed_users,
     )

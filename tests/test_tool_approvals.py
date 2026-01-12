@@ -3,18 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from yabot.handler import BotHandler, StreamRegistry
+from langgraph.checkpoint.memory import MemorySaver
 
-
-class DummyRoom:
-    def __init__(self, room_id: str) -> None:
-        self.room_id = room_id
-
-
-class DummyEvent:
-    def __init__(self, sender: str, body: str) -> None:
-        self.sender = sender
-        self.body = body
+from yabot.graph import YabotGraph
 
 
 class DummyFunction:
@@ -52,71 +43,78 @@ class DummyLLM:
         return self.messages.pop(0)
 
 
-class DummyCommands:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+class ValidatingLLM:
+    def __init__(self, tool_call: DummyToolCall, final: str) -> None:
+        self.tool_call = tool_call
+        self.final = final
+        self.calls = 0
 
-    async def try_handle(self, room_id: str, text: str) -> bool:
-        self.calls.append((room_id, text))
-        return False
+    async def create_message(self, model, messages):
+        self.calls += 1
+        if self.calls == 1:
+            return DummyMessage(tool_calls=[self.tool_call])
+
+        tool_indexes = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+        assert tool_indexes, "Expected tool messages before final LLM call."
+        first_tool = tool_indexes[0]
+        assistant_with_calls = any(
+            m.get("role") == "assistant" and m.get("tool_calls") for m in messages[:first_tool]
+        )
+        assert assistant_with_calls, "Tool messages must follow an assistant tool_calls message."
+        return DummyMessage(content=self.final)
 
 
 @pytest.mark.asyncio
-async def test_run_shell_requires_approval_and_remembers(state_store, messenger, tmp_path: Path):
+async def test_run_shell_requires_approval_and_remembers(tmp_path: Path):
     out_path = tmp_path / "out.txt"
     args = json.dumps({"command": f"python -c \"open('{out_path}','w').write('ok')\"", "workdir": str(tmp_path)})
     tool_call = DummyToolCall("call-1", "run_shell", args)
     llm = DummyLLM([DummyMessage(tool_calls=[tool_call]), DummyMessage(content="done")])
-
-    handler = BotHandler(
-        state=state_store,
-        messenger=messenger,
+    graph = YabotGraph(
         llm=llm,
-        commands=DummyCommands(),
         default_model="gpt-4o-mini",
-        streams=StreamRegistry(),
-        allowed_users=[],
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        checkpointer=MemorySaver(),
     )
 
-    await handler.on_message(DummyRoom("room1"), DummyEvent("@alice:example.org", "run"))
+    result = await graph.ainvoke("room1", "run")
 
     assert not out_path.exists()
-    assert "Approve running shell command" in messenger.sent[-1][1]
+    assert "Approve running shell command" in result["responses"][0]
 
-    await handler.on_message(DummyRoom("room1"), DummyEvent("@alice:example.org", " y "))
+    result = await graph.ainvoke("room1", " y ")
 
     assert out_path.exists()
-    assert messenger.sent[-1][1] == "done"
-    assert state_store.room_is_shell_approved("room1", json.loads(args)["command"], str(tmp_path))
+    assert result["responses"][0] == "done"
+    approvals = result["approvals"]["shell"]
+    assert f"{json.loads(args)['command']}\n{str(tmp_path)}" in approvals
 
 
 @pytest.mark.asyncio
-async def test_run_shell_cancelled_on_non_y(state_store, messenger, tmp_path: Path):
+async def test_run_shell_cancelled_on_non_y(tmp_path: Path):
     out_path = tmp_path / "cancel.txt"
     args = json.dumps({"command": f"python -c \"open('{out_path}','w').write('ok')\"", "workdir": str(tmp_path)})
     tool_call = DummyToolCall("call-1", "run_shell", args)
     llm = DummyLLM([DummyMessage(tool_calls=[tool_call])])
-
-    handler = BotHandler(
-        state=state_store,
-        messenger=messenger,
+    graph = YabotGraph(
         llm=llm,
-        commands=DummyCommands(),
         default_model="gpt-4o-mini",
-        streams=StreamRegistry(),
-        allowed_users=[],
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        checkpointer=MemorySaver(),
     )
 
-    await handler.on_message(DummyRoom("room1"), DummyEvent("@alice:example.org", "run"))
-    await handler.on_message(DummyRoom("room1"), DummyEvent("@alice:example.org", "nope"))
+    await graph.ainvoke("room1", "run")
+    result = await graph.ainvoke("room1", "nope")
 
     assert not out_path.exists()
-    assert messenger.sent[-1][1] == "Cancelled."
-    assert state_store.room_get_pending("room1") is None
+    assert result["responses"][0] == "Cancelled."
+    assert result["approvals"]["pending"] is None
 
 
 @pytest.mark.asyncio
-async def test_fs_tool_approval_scopes_directory(state_store, messenger, tmp_path: Path):
+async def test_fs_tool_approval_scopes_directory(tmp_path: Path):
     file_path = tmp_path / "note.txt"
     file_path.write_text("hi", encoding="utf-8")
     args1 = json.dumps({"path": str(file_path)})
@@ -132,26 +130,45 @@ async def test_fs_tool_approval_scopes_directory(state_store, messenger, tmp_pat
             DummyMessage(content="done2"),
         ]
     )
-
-    handler = BotHandler(
-        state=state_store,
-        messenger=messenger,
+    graph = YabotGraph(
         llm=llm,
-        commands=DummyCommands(),
         default_model="gpt-4o-mini",
-        streams=StreamRegistry(),
-        allowed_users=[],
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        checkpointer=MemorySaver(),
     )
 
-    await handler.on_message(DummyRoom("room1"), DummyEvent("@alice:example.org", "read"))
+    result = await graph.ainvoke("room1", "read")
 
-    assert "Approve access to directory" in messenger.sent[-1][1]
+    assert "Approve access to directory" in result["responses"][0]
 
-    await handler.on_message(DummyRoom("room1"), DummyEvent("@alice:example.org", "y"))
+    result = await graph.ainvoke("room1", "y")
 
-    assert messenger.sent[-1][1] == "done1"
-    assert state_store.room_is_dir_approved("room1", str(tmp_path))
+    assert result["responses"][0] == "done1"
+    assert str(tmp_path) in result["approvals"]["dirs"]
 
-    await handler.on_message(DummyRoom("room1"), DummyEvent("@alice:example.org", "read again"))
+    result = await graph.ainvoke("room1", "read again")
 
-    assert messenger.sent[-1][1] == "done2"
+    assert result["responses"][0] == "done2"
+
+
+@pytest.mark.asyncio
+async def test_tool_messages_follow_tool_calls(tmp_path: Path):
+    file_path = tmp_path / "note.txt"
+    file_path.write_text("hi", encoding="utf-8")
+    args = json.dumps({"path": str(file_path)})
+    tool_call = DummyToolCall("call-1", "read_file", args)
+    llm = ValidatingLLM(tool_call, "done")
+    graph = YabotGraph(
+        llm=llm,
+        default_model="gpt-4o-mini",
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        checkpointer=MemorySaver(),
+    )
+
+    result = await graph.ainvoke("room1", "read")
+    assert "Approve access to directory" in result["responses"][0]
+
+    result = await graph.ainvoke("room1", "y")
+    assert result["responses"][0] == "done"

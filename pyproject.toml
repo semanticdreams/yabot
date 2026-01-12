@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "appdirs>=1.4.4",
+    "langgraph>=0.2.0",
     "matrix-nio[e2e]>=0.25.2",
     "openai>=2.15.0",
     "pynacl>=1.5.0",

@@ -1,4 +1,4 @@
 .PHONY: test
 
 test:
-	PYTHONPATH=. uv run --project . pytest
+	PYTHONPATH=. uv run --project . python -m pytest
