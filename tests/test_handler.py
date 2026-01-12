@@ -17,13 +17,19 @@ class DummyEvent:
 
 
 class DummyLLM:
+    class Message:
+        def __init__(self, content: str) -> None:
+            self.role = "assistant"
+            self.content = content
+            self.tool_calls = []
+
     def __init__(self, reply: str = "ok") -> None:
         self.reply = reply
-        self.calls: list[tuple[str, str, list[dict[str, str]]]] = []
+        self.calls: list[tuple[str, list[dict[str, str]]]] = []
 
-    async def respond_streaming(self, messenger, room_id, model, messages):
-        self.calls.append((room_id, model, messages))
-        return self.reply, [{"role": "assistant", "content": self.reply}]
+    async def create_message(self, model, messages):
+        self.calls.append((model, messages))
+        return self.Message(self.reply)
 
 
 class DummyCommands:

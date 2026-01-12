@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from matrix_bot.storage import atomic_write_json, load_json
@@ -56,7 +57,57 @@ class StateStore:
                 "conversations": {
                     conv_id: {"model": self.default_model, "messages": []}
                 },
+                "approvals": {"shell": [], "dirs": [], "pending": None},
             }
+        else:
+            rooms[room_id].setdefault("approvals", {"shell": [], "dirs": [], "pending": None})
+
+    def room_get_pending(self, room_id: str) -> Optional[Dict[str, Any]]:
+        self.ensure_room(room_id)
+        return self.state["rooms"][room_id].get("approvals", {}).get("pending")
+
+    def room_set_pending(self, room_id: str, pending: Dict[str, Any]) -> None:
+        self.ensure_room(room_id)
+        self.state["rooms"][room_id].setdefault("approvals", {"shell": [], "dirs": [], "pending": None})
+        self.state["rooms"][room_id]["approvals"]["pending"] = pending
+
+    def room_clear_pending(self, room_id: str) -> None:
+        self.ensure_room(room_id)
+        self.state["rooms"][room_id].setdefault("approvals", {"shell": [], "dirs": [], "pending": None})
+        self.state["rooms"][room_id]["approvals"]["pending"] = None
+
+    def room_is_shell_approved(self, room_id: str, command: str, workdir: Optional[str]) -> bool:
+        self.ensure_room(room_id)
+        approvals = self.state["rooms"][room_id].setdefault("approvals", {"shell": [], "dirs": [], "pending": None})
+        key = f"{command}\n{workdir or ''}"
+        return key in approvals.get("shell", [])
+
+    def room_approve_shell(self, room_id: str, command: str, workdir: Optional[str]) -> None:
+        self.ensure_room(room_id)
+        approvals = self.state["rooms"][room_id].setdefault("approvals", {"shell": [], "dirs": [], "pending": None})
+        key = f"{command}\n{workdir or ''}"
+        shell_list = approvals.setdefault("shell", [])
+        if key not in shell_list:
+            shell_list.append(key)
+
+    def room_is_dir_approved(self, room_id: str, path: str) -> bool:
+        self.ensure_room(room_id)
+        approvals = self.state["rooms"][room_id].setdefault("approvals", {"shell": [], "dirs": [], "pending": None})
+        dir_list = approvals.get("dirs", [])
+        target = Path(path).expanduser().resolve(strict=False)
+        for approved in dir_list:
+            approved_path = Path(approved).expanduser().resolve(strict=False)
+            if target == approved_path or target.is_relative_to(approved_path):
+                return True
+        return False
+
+    def room_approve_dir(self, room_id: str, path: str) -> None:
+        self.ensure_room(room_id)
+        approvals = self.state["rooms"][room_id].setdefault("approvals", {"shell": [], "dirs": [], "pending": None})
+        dir_list = approvals.setdefault("dirs", [])
+        normalized = str(Path(path).expanduser().resolve(strict=False))
+        if normalized not in dir_list:
+            dir_list.append(normalized)
 
     def room_active_conv(self, room_id: str) -> Tuple[str, Dict[str, Any]]:
         self.ensure_room(room_id)
