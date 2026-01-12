@@ -3,7 +3,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from .storage import atomic_write_json, load_json
+from matrix_bot.storage import atomic_write_json, load_json
 from .tokens import (
     context_window_for_model,
     estimate_message_tokens,

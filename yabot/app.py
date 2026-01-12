@@ -5,10 +5,10 @@ from nio import InviteMemberEvent, MegolmEvent, RoomMessage, SyncResponse, Unkno
 
 from .commands import CommandProcessor
 from .config import load_config
-from .cross_signing import CrossSigningManager
+from matrix_bot.cross_signing import CrossSigningManager
 from .handler import BotHandler, StreamRegistry
 from .llm import LLMClient
-from .matrix import MatrixMessenger, auto_trust_devices, login_or_restore
+from matrix_bot.matrix import MatrixMessenger, auto_trust_devices, login_or_restore
 from .state import StateStore
 
 
@@ -26,7 +26,13 @@ async def main() -> None:
     )
     await state.load()
 
-    client = await login_or_restore(config)
+    client = await login_or_restore(
+        config.homeserver,
+        config.bot_user,
+        config.bot_password,
+        config.creds_path,
+        config.nio_store_dir,
+    )
     messenger = MatrixMessenger(client)
     streams = StreamRegistry()
     cross_signing = CrossSigningManager(

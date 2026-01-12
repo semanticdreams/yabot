@@ -57,7 +57,7 @@ class CrossSigningManager:
         self.data_dir = data_dir
         self.path = os.path.join(data_dir, "cross_signing.json")
         self.uia_path = os.path.join(data_dir, "cross_signing_uia.json")
-        self.logger = logging.getLogger("yabot.cross_signing")
+        self.logger = logging.getLogger("matrix_bot.cross_signing")
         self._lock = asyncio.Lock()
         self._keys: Optional[CrossSigningKeys] = None
         self._server_ready = False

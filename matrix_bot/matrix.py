@@ -3,7 +3,6 @@ from typing import Dict, Optional
 
 from nio import AsyncClient, AsyncClientConfig, LoginResponse, MembersSyncError, RoomSendError
 
-from .config import Config
 from .storage import atomic_write_json, load_json
 
 
@@ -25,8 +24,14 @@ def save_creds(path: str, access_token: str, device_id: str, user_id: str) -> No
     )
 
 
-async def login_or_restore(config: Config) -> AsyncClient:
-    if not config.bot_user:
+async def login_or_restore(
+    homeserver: str,
+    bot_user: Optional[str],
+    bot_password: Optional[str],
+    creds_path: str,
+    nio_store_dir: str,
+) -> AsyncClient:
+    if not bot_user:
         raise RuntimeError("MATRIX_USER is not set")
 
     client_config = AsyncClientConfig(
@@ -34,15 +39,10 @@ async def login_or_restore(config: Config) -> AsyncClient:
         store_sync_tokens=True,
     )
 
-    client = AsyncClient(
-        config.homeserver,
-        config.bot_user,
-        store_path=config.nio_store_dir,
-        config=client_config,
-    )
+    client = AsyncClient(homeserver, bot_user, store_path=nio_store_dir, config=client_config)
 
-    creds = load_creds(config.creds_path)
-    if creds and creds.get("user_id") == config.bot_user:
+    creds = load_creds(creds_path)
+    if creds and creds.get("user_id") == bot_user:
         client.access_token = creds["access_token"]
         client.user_id = creds["user_id"]
         client.device_id = creds["device_id"]
@@ -52,12 +52,12 @@ async def login_or_restore(config: Config) -> AsyncClient:
             pass
         return client
 
-    if not config.bot_password:
+    if not bot_password:
         raise RuntimeError("No saved creds found and MATRIX_PASSWORD is not set.")
 
-    resp = await client.login(config.bot_password)
+    resp = await client.login(bot_password)
     if isinstance(resp, LoginResponse):
-        save_creds(config.creds_path, resp.access_token, resp.device_id, resp.user_id)
+        save_creds(creds_path, resp.access_token, resp.device_id, resp.user_id)
         return client
 
     raise RuntimeError(f"Login failed: {resp}")
@@ -66,7 +66,7 @@ async def login_or_restore(config: Config) -> AsyncClient:
 class MatrixMessenger:
     def __init__(self, client: AsyncClient) -> None:
         self.client = client
-        self.logger = logging.getLogger("yabot.matrix")
+        self.logger = logging.getLogger("matrix_bot.matrix")
 
     async def send_text(self, room_id: str, body: str) -> str:
         return await self._send_message(

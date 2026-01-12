@@ -1,7 +1,7 @@
 import re
 from collections.abc import Callable
 
-from .matrix import MatrixMessenger
+from matrix_bot.matrix import MatrixMessenger
 from .state import StateStore
 
 
@@ -44,76 +44,86 @@ class CommandProcessor:
         cmd = m.group(1).lower()
         arg = (m.group(2) or "").strip()
 
-        if cmd in ("help", "h", "?"):
-            await self.messenger.send_text(room_id, help_text())
+        handlers = {
+            "help": self._cmd_help,
+            "h": self._cmd_help,
+            "?": self._cmd_help,
+            "models": self._cmd_models,
+            "model": self._cmd_model,
+            "new": self._cmd_new,
+            "list": self._cmd_list,
+            "use": self._cmd_use,
+            "reset": self._cmd_reset,
+            "stop": self._cmd_stop,
+        }
+
+        handler = handlers.get(cmd)
+        if not handler:
+            await self.messenger.send_text(room_id, "Unknown command.\n" + help_text())
             return True
 
-        if cmd == "models":
+        await handler(room_id, arg)
+        return True
+
+    async def _cmd_help(self, room_id: str, _arg: str) -> None:
+        await self.messenger.send_text(room_id, help_text())
+
+    async def _cmd_models(self, room_id: str, _arg: str) -> None:
+        await self.messenger.send_text(
+            room_id,
+            "Available models:\n" + "\n".join(f"- {x}" for x in self.available_models),
+        )
+
+    async def _cmd_model(self, room_id: str, arg: str) -> None:
+        if not arg:
             await self.messenger.send_text(
                 room_id,
-                "Available models:\n" + "\n".join(f"- {x}" for x in self.available_models),
+                "Usage: !model <name>\n" + "\n".join(self.available_models),
             )
-            return True
+            return
+        async with self.state.lock:
+            ok = self.state.room_set_model(room_id, arg)
+        if not ok:
+            await self.messenger.send_text(room_id, f"Unknown model `{arg}`.\nUse !models.")
+            return
+        await self.state.save()
+        await self.messenger.send_text(room_id, f"Model set to `{arg}` for this room’s active conversation.")
 
-        if cmd == "model":
-            if not arg:
-                await self.messenger.send_text(
-                    room_id,
-                    "Usage: !model <name>\n" + "\n".join(self.available_models),
-                )
-                return True
-            async with self.state.lock:
-                ok = self.state.room_set_model(room_id, arg)
-            if not ok:
-                await self.messenger.send_text(room_id, f"Unknown model `{arg}`.\nUse !models.")
-                return True
-            await self.state.save()
-            await self.messenger.send_text(room_id, f"Model set to `{arg}` for this room’s active conversation.")
-            return True
+    async def _cmd_new(self, room_id: str, _arg: str) -> None:
+        async with self.state.lock:
+            cid = self.state.room_new_conv(room_id)
+        await self.state.save()
+        await self.messenger.send_text(room_id, f"Started new conversation for this room: `{cid}`")
 
-        if cmd == "new":
-            async with self.state.lock:
-                cid = self.state.room_new_conv(room_id)
-            await self.state.save()
-            await self.messenger.send_text(room_id, f"Started new conversation for this room: `{cid}`")
-            return True
+    async def _cmd_list(self, room_id: str, _arg: str) -> None:
+        async with self.state.lock:
+            items = self.state.room_list_convs(room_id)
+        lines = ["Conversations for this room:"]
+        for cid, model, nmsgs, is_active in items:
+            mark = " (active)" if is_active else ""
+            lines.append(f"- `{cid}` [{model}] msgs={nmsgs}{mark}")
+        await self.messenger.send_text(room_id, "\n".join(lines))
 
-        if cmd == "list":
-            async with self.state.lock:
-                items = self.state.room_list_convs(room_id)
-            lines = ["Conversations for this room:"]
-            for cid, model, nmsgs, is_active in items:
-                mark = " (active)" if is_active else ""
-                lines.append(f"- `{cid}` [{model}] msgs={nmsgs}{mark}")
-            await self.messenger.send_text(room_id, "\n".join(lines))
-            return True
+    async def _cmd_use(self, room_id: str, arg: str) -> None:
+        if not arg:
+            await self.messenger.send_text(room_id, "Usage: !use <conversation_id>")
+            return
+        async with self.state.lock:
+            ok = self.state.room_use_conv(room_id, arg)
+        if not ok:
+            await self.messenger.send_text(room_id, f"No conversation `{arg}` in this room. Use !list.")
+            return
+        await self.state.save()
+        await self.messenger.send_text(room_id, f"Switched active conversation to `{arg}` for this room.")
 
-        if cmd == "use":
-            if not arg:
-                await self.messenger.send_text(room_id, "Usage: !use <conversation_id>")
-                return True
-            async with self.state.lock:
-                ok = self.state.room_use_conv(room_id, arg)
-            if not ok:
-                await self.messenger.send_text(room_id, f"No conversation `{arg}` in this room. Use !list.")
-                return True
-            await self.state.save()
-            await self.messenger.send_text(room_id, f"Switched active conversation to `{arg}` for this room.")
-            return True
+    async def _cmd_reset(self, room_id: str, _arg: str) -> None:
+        async with self.state.lock:
+            self.state.room_reset(room_id)
+        await self.state.save()
+        await self.messenger.send_text(room_id, "Cleared memory for this room’s active conversation.")
 
-        if cmd == "reset":
-            async with self.state.lock:
-                self.state.room_reset(room_id)
-            await self.state.save()
-            await self.messenger.send_text(room_id, "Cleared memory for this room’s active conversation.")
-            return True
-
-        if cmd == "stop":
-            if self.stop_stream(room_id):
-                await self.messenger.send_text(room_id, "Stopping current response…")
-            else:
-                await self.messenger.send_text(room_id, "No active response to stop.")
-            return True
-
-        await self.messenger.send_text(room_id, "Unknown command.\n" + help_text())
-        return True
+    async def _cmd_stop(self, room_id: str, _arg: str) -> None:
+        if self.stop_stream(room_id):
+            await self.messenger.send_text(room_id, "Stopping current response…")
+        else:
+            await self.messenger.send_text(room_id, "No active response to stop.")

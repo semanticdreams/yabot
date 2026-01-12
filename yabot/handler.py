@@ -6,7 +6,7 @@ from nio import InviteMemberEvent, MatrixRoom, MegolmEvent, RoomMessage, Unknown
 
 from .commands import CommandProcessor
 from .llm import LLMClient
-from .matrix import MatrixMessenger
+from matrix_bot.matrix import MatrixMessenger
 from .state import StateStore
 
 
