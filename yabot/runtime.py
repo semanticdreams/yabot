@@ -7,6 +7,7 @@ from .config import Config
 from .graph import YabotGraph
 from .llm import LLMClient
 from .skills import load_skills
+from .system_prompt import system_prompt
 from .trace import TraceLogger
 
 
@@ -35,4 +36,5 @@ def build_graph(config: Config) -> YabotGraph:
         skills=skills,
         checkpointer=checkpointer,
         tracer=tracer,
+        system_prompt=system_prompt(),
     )

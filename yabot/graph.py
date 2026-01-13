@@ -39,6 +39,7 @@ class YabotGraph:
         skills: SkillRegistry,
         checkpointer: Any | None = None,
         tracer: Any | None = None,
+        system_prompt: str | None = None,
     ) -> None:
         self.llm = llm
         self.default_model = default_model
@@ -49,6 +50,7 @@ class YabotGraph:
         self.skill_tools = skills.tool_defs()
         self.checkpointer = checkpointer or MemorySaver()
         self.tracer = tracer
+        self.system_prompt = system_prompt
         self.graph = self._build_graph()
 
     async def ainvoke(self, room_id: str, text: str) -> Dict[str, Any]:
@@ -66,6 +68,15 @@ class YabotGraph:
         builder.set_entry_point("process")
         builder.add_edge("process", END)
         return builder.compile(checkpointer=self.checkpointer)
+
+    def _ensure_system_prompt(self, conv: Dict[str, Any]) -> None:
+        if not self.system_prompt:
+            return
+        messages = conv.get("messages", [])
+        for msg in messages:
+            if msg.get("role") == "system" and msg.get("content") == self.system_prompt:
+                return
+        conv["messages"] = [{"role": "system", "content": self.system_prompt}] + list(messages)
 
     def _tool_calls_to_dicts(self, tool_calls: Any) -> List[dict[str, Any]]:
         normalized: List[dict[str, Any]] = []
@@ -313,6 +324,7 @@ class YabotGraph:
         conv_id, conv = room_active_conv(state)
         model = conv.get("model", self.default_model)
         trace_ctx.update({"conv_id": conv_id, "model": model})
+        self._ensure_system_prompt(conv)
 
         if self.tracer:
             self.tracer.log("incoming", {"text": incoming}, context=trace_ctx)
