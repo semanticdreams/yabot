@@ -30,6 +30,8 @@ class GraphState(TypedDict, total=False):
     approvals: Dict[str, Any]
     trace: Dict[str, Any]
     plan: List[str]
+    plan_steps: List[str]
+    plan_index: int
 
 
 class YabotGraph:
@@ -166,6 +168,61 @@ class YabotGraph:
         if self.tracer:
             self.tracer.log("plan_created", {"steps": steps, "count": len(steps)}, context=trace_ctx)
         return steps
+
+    async def _run_plan_steps(
+        self,
+        state: Dict[str, Any],
+        model: str,
+        conv: Dict[str, Any],
+        trace_ctx: dict[str, Any],
+        agents_loaded: List[str],
+        start_index: int | None = None,
+    ) -> tuple[List[str], dict[str, Any] | None]:
+        steps = list(state.get("plan_steps") or [])
+        if not steps:
+            return [], None
+        index = start_index if start_index is not None else int(state.get("plan_index", 0))
+        total = len(steps)
+        responses: List[str] = []
+        stream_callback = self._stream_callback.get()
+
+        while index < total:
+            step = steps[index]
+            header = f"[system] Step {index + 1}/{total}: {step}"
+            if stream_callback:
+                await stream_callback(header + "\n")
+            responses.append(header)
+
+            user_msg = {"role": "user", "content": f"Execute step {index + 1}/{total}: {step}"}
+            conv_messages = conv.get("messages", [])
+            conv_messages.append(user_msg)
+            conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+
+            step_responses, new_messages, pending_next = await self._run_llm_loop(
+                state,
+                model,
+                conv.get("messages", []),
+                trace_ctx,
+                agents_loaded,
+            )
+            responses.extend(step_responses)
+
+            if pending_next:
+                state["approvals"]["pending"] = pending_next
+                state["plan_index"] = index
+                return responses, pending_next
+
+            if new_messages is not None:
+                conv_messages = conv.get("messages", [])
+                conv_messages.extend(new_messages)
+                conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+
+            index += 1
+            state["plan_index"] = index
+
+        state.pop("plan_steps", None)
+        state.pop("plan_index", None)
+        return responses, None
 
     def _message_to_dict(self, message: Any) -> dict[str, Any]:
         if isinstance(message, dict):
@@ -591,6 +648,16 @@ class YabotGraph:
                     conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
 
             state["responses"] = responses
+            if pending_next is None and state.get("plan_steps"):
+                state["plan_index"] = int(state.get("plan_index", 0)) + 1
+                follow_responses, follow_pending = await self._run_plan_steps(
+                    state, model, conv, trace_ctx, agents_loaded
+                )
+                responses.extend(follow_responses)
+                if follow_pending:
+                    state["responses"] = responses
+                    return state
+            state["responses"] = responses
             return state
 
         parsed = parse_command(incoming)
@@ -613,6 +680,8 @@ class YabotGraph:
             plan_steps = await self._auto_plan(incoming, model, trace_ctx)
             if plan_steps:
                 state["plan"] = plan_steps
+                state["plan_steps"] = plan_steps
+                state["plan_index"] = 0
                 plan_message = {"role": "system", "content": "Planned steps:\n- " + "\n- ".join(plan_steps)}
                 conv_messages = conv.get("messages", [])
                 conv_messages.append(plan_message)
@@ -621,21 +690,28 @@ class YabotGraph:
                 if stream_callback:
                     await stream_callback("[system] Plan:\n- " + "\n- ".join(plan_steps) + "\n")
 
-        responses, new_messages, pending_next = await self._run_llm_loop(
-            state,
-            model,
-            conv.get("messages", []),
-            trace_ctx,
-            agents_loaded,
-        )
+        if plan_steps:
+            responses, pending_next = await self._run_plan_steps(state, model, conv, trace_ctx, agents_loaded, 0)
+            if pending_next:
+                state["responses"] = responses
+                return state
+        else:
+            responses, new_messages, pending_next = await self._run_llm_loop(
+                state,
+                model,
+                conv.get("messages", []),
+                trace_ctx,
+                agents_loaded,
+            )
+            if pending_next:
+                state["approvals"]["pending"] = pending_next
+            elif new_messages is not None:
+                conv_messages = conv.get("messages", [])
+                conv_messages.extend(new_messages)
+                conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+
         if plan_steps and not self._stream_callback.get():
             responses = ["Plan:\n- " + "\n- ".join(plan_steps)] + responses
-        if pending_next:
-            state["approvals"]["pending"] = pending_next
-        elif new_messages is not None:
-            conv_messages = conv.get("messages", [])
-            conv_messages.extend(new_messages)
-            conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
 
         state["responses"] = responses
         if self.tracer:

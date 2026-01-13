@@ -37,6 +37,11 @@ class PlannerLLM:
         system = messages[0].get("content", "") if messages else ""
         if "planner" in system.lower():
             return self.Message("- step one\n- step two")
+        user = messages[-1].get("content", "") if messages else ""
+        if "step one" in user:
+            return self.Message("done one")
+        if "step two" in user:
+            return self.Message("done two")
         return self.Message("done")
 
 
@@ -121,5 +126,8 @@ async def test_auto_plans_complex_requests():
 
     assert result["responses"][0].startswith("Plan:")
     assert "step one" in result["responses"][0]
-    assert "done" in result["responses"][1]
-    assert len(llm.calls) == 2
+    assert "[system] Step 1/2" in result["responses"][1]
+    assert "done one" in result["responses"][2]
+    assert "[system] Step 2/2" in result["responses"][3]
+    assert "done two" in result["responses"][4]
+    assert len(llm.calls) == 3
