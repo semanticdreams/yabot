@@ -93,7 +93,8 @@ async def test_skill_tool_injects_system_message():
     )
 
     result = await graph.ainvoke("room1", "do something")
-    assert result["responses"][0] == "done"
+    assert result["responses"][-1] == "done"
+    assert result["tool_notices"][0].startswith("Tool call: skill__demo_skill")
     conv = result["conversations"][result["active"]]["messages"]
     assert any(m.get("role") == "system" and "Use the demo approach." in m.get("content", "") for m in conv)
 

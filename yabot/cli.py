@@ -247,6 +247,8 @@ class YabotCLIApp(App):
             self.status_text = "Ready"
 
     def _apply_result(self, result: dict[str, Any]) -> None:
+        for body in result.get("tool_notices", []) or []:
+            self._append_message("System", body)
         for body in result.get("responses", []) or []:
             self._append_message("Yabot", body)
 

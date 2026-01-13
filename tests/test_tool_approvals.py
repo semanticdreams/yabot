@@ -83,6 +83,7 @@ async def test_run_shell_requires_approval_and_remembers(tmp_path: Path):
     result = await graph.ainvoke("room1", "run")
 
     assert not out_path.exists()
+    assert result["tool_notices"][0].startswith("Tool call: run_shell")
     assert "Approve running shell command" in result["responses"][0]
 
     result = await graph.ainvoke("room1", " y ")
@@ -144,6 +145,7 @@ async def test_fs_tool_approval_scopes_directory(tmp_path: Path):
 
     result = await graph.ainvoke("room1", "read")
 
+    assert result["tool_notices"][0].startswith("Tool call: read_file")
     assert "Approve access to directory" in result["responses"][0]
 
     result = await graph.ainvoke("room1", "y")
@@ -153,7 +155,8 @@ async def test_fs_tool_approval_scopes_directory(tmp_path: Path):
 
     result = await graph.ainvoke("room1", "read again")
 
-    assert result["responses"][0] == "done2"
+    assert result["responses"][-1] == "done2"
+    assert result["tool_notices"][0].startswith("Tool call: read_file")
 
 
 @pytest.mark.asyncio
@@ -173,6 +176,7 @@ async def test_tool_messages_follow_tool_calls(tmp_path: Path):
     )
 
     result = await graph.ainvoke("room1", "read")
+    assert result["tool_notices"][0].startswith("Tool call: read_file")
     assert "Approve access to directory" in result["responses"][0]
 
     result = await graph.ainvoke("room1", "y")
