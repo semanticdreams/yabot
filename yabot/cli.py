@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import html
 import logging
 import os
 import sys
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -61,6 +63,7 @@ class YabotCLI:
         self.input_fn = input_fn
         self.output = output or sys.stdout
         self.prompt = prompt
+        self._prompt_pt = HTML(f"<skyblue>{html.escape(self.prompt)}</skyblue>")
         self._pt_session: PromptSession | None = None
 
     def run(self) -> None:
@@ -74,17 +77,20 @@ class YabotCLI:
             print("\n[system] Interrupted.", file=self.output)
 
     async def run_async(self) -> None:
-        await self._print("[system] Welcome to Yabot CLI. Type !help for commands.")
-        await self._ensure_remote()
+        if self.input_fn is None:
+            self._pt_session = PromptSession()
         try:
+            await self._print("[system] Welcome to Yabot CLI. Type !help for commands.")
+            await self._ensure_remote()
             if self.input_fn is None:
-                await self._prompt_toolkit_loop()
+                await self._prompt_toolkit_loop(self._pt_session)
             else:
                 await self._input_fn_loop()
         finally:
             await self._drain_pending()
             await self._close_remote()
             await self._print("[system] Shutdown complete.")
+            self._pt_session = None
 
     async def _input_fn_loop(self) -> None:
         while True:
@@ -98,14 +104,12 @@ class YabotCLI:
                 return
             await self._handle_line(str(line))
 
-    async def _prompt_toolkit_loop(self) -> None:
-        session = PromptSession()
-        self._pt_session = session
+    async def _prompt_toolkit_loop(self, session: PromptSession) -> None:
         try:
             with patch_stdout():
                 while True:
                     try:
-                        line = await session.prompt_async(self.prompt)
+                        line = await session.prompt_async(self._prompt_pt)
                     except EOFError:
                         await self._print("[system] Input closed.")
                         return
@@ -128,6 +132,7 @@ class YabotCLI:
         text = line.strip()
         if not text:
             return
+        await self._print(f"[you] {text}")
         if is_stop_command(text):
             await self._handle_stop()
             return
@@ -175,9 +180,19 @@ class YabotCLI:
     async def _print(self, text: str) -> None:
         async with self._print_lock:
             if self._pt_session is not None:
-                print_formatted_text(text, output=self._pt_session.output)
+                print_formatted_text(self._format_text(text), output=self._pt_session.output)
             else:
                 print(text, file=self.output, flush=True)
+
+    def _format_text(self, text: str) -> HTML:
+        escaped = html.escape(text)
+        if text.startswith("[system] Error:"):
+            return HTML(f"<ansired>{escaped}</ansired>")
+        if text.startswith("[system]"):
+            return HTML(f"<gray>{escaped}</gray>")
+        if text.startswith("[you]"):
+            return HTML(f"<ansicyan>{escaped}</ansicyan>")
+        return HTML(f"<ansigreen>{escaped}</ansigreen>")
 
     async def _ensure_remote(self) -> None:
         if not isinstance(self.graph, RemoteGraphClient):
