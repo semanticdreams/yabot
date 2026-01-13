@@ -22,6 +22,7 @@ class Config:
     state_path: str
     creds_path: str
     nio_store_dir: str
+    daemon_url: str | None
 
 
 def load_config() -> Config:
@@ -35,6 +36,7 @@ def load_config() -> Config:
     allowed_users_raw = os.environ.get("ALLOWED_USERS", "")
     allowed_users = [u.strip() for u in allowed_users_raw.split(",") if u.strip()]
     cross_signing_reset = os.environ.get("CROSS_SIGNING_RESET", "").strip().lower() in {"1", "true", "yes"}
+    daemon_url = os.environ.get("YABOT_DAEMON_URL")
 
     available_models = [
         "gpt-4o-mini",
@@ -70,4 +72,5 @@ def load_config() -> Config:
         state_path=state_path,
         creds_path=creds_path,
         nio_store_dir=nio_store_dir,
+        daemon_url=daemon_url,
     )

@@ -1,7 +1,7 @@
 [project]
 name = "yabot"
 version = "0.1.0"
-description = "Add your description here"
+description = "yet another bot"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,11 +13,13 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "textual>=0.74.0",
     "tiktoken>=0.12.0",
+    "websockets>=12.0",
 ]
 
 [project.scripts]
-yabot = "yabot.app:run"
+yabot-matrix = "yabot.matrix_app:run"
 yabot-cli = "yabot.cli:run"
+yabotd = "yabot.daemon:run"
 
 [project.optional-dependencies]
 test = [

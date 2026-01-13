@@ -1,4 +1,4 @@
-from yabot.app import run
+from yabot.matrix_app import run
 
 
 if __name__ == "__main__":

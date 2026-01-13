@@ -8,7 +8,7 @@ def main() -> None:
 
 
 def run() -> None:
-    from .app import run as _run
+    from .matrix_app import run as _run
 
     _run()
 

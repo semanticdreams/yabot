@@ -1,10 +1,12 @@
 import asyncio
 import logging
+
 from nio import InviteMemberEvent, MegolmEvent, RoomMessage, SyncResponse, UnknownEncryptedEvent
 
 from .config import load_config
 from matrix_bot.cross_signing import CrossSigningManager
 from .handler import BotHandler
+from .remote import RemoteGraphClient
 from .runtime import build_graph
 from matrix_bot.matrix import MatrixMessenger, auto_trust_devices, login_or_restore
 from .streams import StreamRegistry
@@ -30,7 +32,11 @@ async def main() -> None:
         reset=config.cross_signing_reset,
         password=config.bot_password,
     )
-    graph = build_graph(config)
+    if config.daemon_url:
+        graph = RemoteGraphClient(config.daemon_url)
+        await graph.connect()
+    else:
+        graph = build_graph(config)
     handler = BotHandler(
         messenger,
         graph,
@@ -53,6 +59,8 @@ async def main() -> None:
     try:
         await client.sync_forever(timeout=30000, full_state=True)
     finally:
+        if isinstance(graph, RemoteGraphClient):
+            await graph.close()
         await client.close()
 
 

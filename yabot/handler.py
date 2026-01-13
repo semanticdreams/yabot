@@ -3,7 +3,7 @@ from typing import Any
 
 from nio import InviteMemberEvent, MatrixRoom, MegolmEvent, RoomMessage, UnknownEncryptedEvent
 
-from .interaction import dispatch_graph, is_stop_command
+from .interaction import dispatch_graph, is_stop_command, request_stop
 from matrix_bot.matrix import MatrixMessenger
 from .streams import StreamRegistry
 
@@ -45,7 +45,7 @@ class BotHandler:
             return
 
         if is_stop_command(text):
-            if self.streams.stop(room_id):
+            if await request_stop(self.graph, self.streams, room_id):
                 await self.messenger.send_text(room_id, "Stopping current response…")
             else:
                 await self.messenger.send_text(room_id, "No active response to stop.")

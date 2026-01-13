@@ -10,6 +10,13 @@ def is_stop_command(text: str) -> bool:
     return bool(parsed and parsed[0] == "stop")
 
 
+async def request_stop(graph: Any, streams: StreamRegistry, room_id: str) -> bool:
+    stopper = getattr(graph, "stop", None)
+    if callable(stopper):
+        return await stopper(room_id)
+    return streams.stop(room_id)
+
+
 async def dispatch_graph(
     graph: Any,
     streams: StreamRegistry,

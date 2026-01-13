@@ -3,8 +3,9 @@
 ## Running
 
 - Install dependencies: `uv pip install -e .`
-- Run Matrix bot: `uv run --project . yabot`
+- Run Matrix bot: `uv run --project . yabot-matrix`
 - Run CLI: `uv run --project . yabot-cli`
+- Run daemon: `uv run --project . yabotd`
 - Tool install (refresh tool env): `uv tool install --force --editable .`
 
 ## Environment variables
@@ -16,6 +17,15 @@
 - `BOT_NAME`: defaults to `yabot`.
 - `ALLOWED_USERS`: comma-separated allowlist; empty means allow all.
 - `CROSS_SIGNING_RESET`: set to `1`/`true`/`yes` to force a cross-signing reset.
+- `YABOT_DAEMON_URL`: when set, the CLI and Matrix bot connect to a running daemon instead of running the agent locally.
+
+## Daemon mode (shared state)
+
+Start the daemon once, then point both clients at it:
+
+- `uv run --project . yabotd`
+- `YABOT_DAEMON_URL=ws://127.0.0.1:8765 uv run --project . yabot-matrix`
+- `YABOT_DAEMON_URL=ws://127.0.0.1:8765 uv run --project . yabot-cli`
 
 ## CLI usage
 

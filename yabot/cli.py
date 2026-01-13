@@ -11,7 +11,8 @@ from textual.widgets import Footer, Header, Input, Static
 
 from .commands import active_conversation_meta
 from .config import load_config
-from .interaction import dispatch_graph, is_stop_command
+from .interaction import dispatch_graph, is_stop_command, request_stop
+from .remote import RemoteGraphClient
 from .runtime import build_graph
 from .streams import StreamRegistry
 
@@ -101,11 +102,17 @@ class YabotCLIApp(App):
             yield Input(placeholder="Type a message. Enter to send. !help for commands.", id="chat-input")
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self.active_model = self.default_model
         self._update_status()
         self.query_one("#chat-input", Input).focus()
         self._append_system("Welcome to Yabot CLI. Type !help for commands.")
+        if isinstance(self.graph, RemoteGraphClient):
+            await self.graph.connect()
+
+    async def on_shutdown(self) -> None:
+        if isinstance(self.graph, RemoteGraphClient):
+            await self.graph.close()
 
     def watch_status_text(self, _old: str, _new: str) -> None:
         self._update_status()
@@ -123,7 +130,7 @@ class YabotCLIApp(App):
             return
         self._append_message("You", text)
         if is_stop_command(text):
-            self._handle_stop()
+            await self._handle_stop()
             return
         self._start_dispatch(text)
 
@@ -142,8 +149,8 @@ class YabotCLIApp(App):
     def action_help(self) -> None:
         self._enqueue_command("!help")
 
-    def action_stop(self) -> None:
-        self._handle_stop()
+    async def action_stop(self) -> None:
+        await self._handle_stop()
 
     def _enqueue_command(self, command: str) -> None:
         self._append_message("You", command)
@@ -161,8 +168,8 @@ class YabotCLIApp(App):
             f"Status: {self.status_text} | Conversation: {self.active_conversation} | Model: {self.active_model}"
         )
 
-    def _handle_stop(self) -> None:
-        if self.streams.stop(self.room_id):
+    async def _handle_stop(self) -> None:
+        if await request_stop(self.graph, self.streams, self.room_id):
             self._stop_requested = True
             self._append_system("Stopping current response…")
         else:
@@ -204,7 +211,10 @@ def run() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     config = load_config()
-    graph = build_graph(config)
+    if config.daemon_url:
+        graph = RemoteGraphClient(config.daemon_url)
+    else:
+        graph = build_graph(config)
     app = YabotCLIApp(
         graph=graph,
         available_models=config.available_models,
