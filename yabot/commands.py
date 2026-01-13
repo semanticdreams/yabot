@@ -48,6 +48,14 @@ def ensure_state(state: State, default_model: str) -> None:
         state["approvals"] = {"shell": [], "dirs": [], "pending": None}
 
 
+def active_conversation_meta(state: State) -> Tuple[str | None, str | None]:
+    conv_id = state.get("active")
+    if not conv_id:
+        return None, None
+    conv = state.get("conversations", {}).get(conv_id, {})
+    return conv_id, conv.get("model")
+
+
 def room_active_conv(state: State) -> Tuple[str, Dict[str, Any]]:
     conv_id = state["active"]
     return conv_id, state["conversations"][conv_id]

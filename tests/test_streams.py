@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from yabot.handler import StreamRegistry
+from yabot.streams import StreamRegistry
 
 
 @pytest.mark.asyncio

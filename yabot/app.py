@@ -4,9 +4,10 @@ from nio import InviteMemberEvent, MegolmEvent, RoomMessage, SyncResponse, Unkno
 
 from .config import load_config
 from matrix_bot.cross_signing import CrossSigningManager
-from .handler import BotHandler, StreamRegistry
+from .handler import BotHandler
 from .runtime import build_graph
 from matrix_bot.matrix import MatrixMessenger, auto_trust_devices, login_or_restore
+from .streams import StreamRegistry
 
 
 async def main() -> None:

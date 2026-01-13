@@ -5,7 +5,7 @@ from .create_dir import TOOL as CREATE_DIR_TOOL, create_dir
 from .get_skills_dir import TOOL as GET_SKILLS_DIR_TOOL, get_skills_dir
 from .list_dir import TOOL as LIST_DIR_TOOL, list_dir
 from .read_file import TOOL as READ_FILE_TOOL, read_file
-from .run_shell import TOOL as RUN_SHELL_TOOL, run_shell
+from .run_shell import TOOL as RUN_SHELL_TOOL, run_shell, run_shell_async
 from .write_file import TOOL as WRITE_FILE_TOOL, write_file
 
 
@@ -36,3 +36,9 @@ def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
     if name == "run_shell":
         return run_shell(str(arguments.get("command", "")), arguments.get("workdir"))
     return f"ERROR: unknown tool {name}"
+
+
+async def execute_tool_async(name: str, arguments: Dict[str, Any]) -> str:
+    if name == "run_shell":
+        return await run_shell_async(str(arguments.get("command", "")), arguments.get("workdir"))
+    return execute_tool(name, arguments)

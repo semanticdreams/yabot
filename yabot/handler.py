@@ -1,38 +1,18 @@
-import asyncio
 import logging
 from typing import Any
 
 from nio import InviteMemberEvent, MatrixRoom, MegolmEvent, RoomMessage, UnknownEncryptedEvent
 
-from .commands import parse_command
-from .graph import YabotGraph
+from .interaction import dispatch_graph, is_stop_command
 from matrix_bot.matrix import MatrixMessenger
-
-
-class StreamRegistry:
-    def __init__(self) -> None:
-        self._active_streams: dict[str, asyncio.Task[dict[str, Any]]] = {}
-
-    def register(self, room_id: str, task: asyncio.Task[dict[str, Any]]) -> None:
-        self._active_streams[room_id] = task
-
-    def clear(self, room_id: str, task: asyncio.Task[dict[str, Any]]) -> None:
-        if self._active_streams.get(room_id) is task:
-            self._active_streams.pop(room_id, None)
-
-    def stop(self, room_id: str) -> bool:
-        task = self._active_streams.get(room_id)
-        if not task or task.done():
-            return False
-        task.cancel()
-        return True
+from .streams import StreamRegistry
 
 
 class BotHandler:
     def __init__(
         self,
         messenger: MatrixMessenger,
-        graph: YabotGraph,
+        graph: Any,
         streams: StreamRegistry,
         allowed_users: list[str],
     ) -> None:
@@ -64,22 +44,20 @@ class BotHandler:
             self.logger.info("Ignoring non-text message type=%s", type(event).__name__)
             return
 
-        parsed = parse_command(text)
-        if parsed and parsed[0] == "stop":
+        if is_stop_command(text):
             if self.streams.stop(room_id):
                 await self.messenger.send_text(room_id, "Stopping current response…")
             else:
                 await self.messenger.send_text(room_id, "No active response to stop.")
             return
 
-        stream_task = asyncio.create_task(self.graph.ainvoke(room_id, text))
-        self.streams.register(room_id, stream_task)
-        self.logger.info("Starting graph response room=%s", room_id)
         try:
-            result = await stream_task
+            result = await dispatch_graph(self.graph, self.streams, room_id, text)
             self.logger.info("Completed graph response room=%s", room_id)
-        finally:
-            self.streams.clear(room_id, stream_task)
+        except Exception as exc:
+            self.logger.exception("Graph error room=%s error=%s", room_id, exc)
+            await self.messenger.send_text(room_id, "Error while processing request.")
+            return
 
         for body in result.get("responses", []) or []:
             await self.messenger.send_text(room_id, body)

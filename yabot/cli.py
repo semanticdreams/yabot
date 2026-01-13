@@ -9,10 +9,11 @@ from textual.containers import Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Input, Static
 
-from .commands import parse_command
+from .commands import active_conversation_meta
 from .config import load_config
-from .handler import StreamRegistry
+from .interaction import dispatch_graph, is_stop_command
 from .runtime import build_graph
+from .streams import StreamRegistry
 
 
 class ChatLog(VerticalScroll):
@@ -121,8 +122,7 @@ class YabotCLIApp(App):
         if not text:
             return
         self._append_message("You", text)
-        parsed = parse_command(text)
-        if parsed and parsed[0] == "stop":
+        if is_stop_command(text):
             self._handle_stop()
             return
         self._start_dispatch(text)
@@ -169,14 +169,12 @@ class YabotCLIApp(App):
             self._append_system("No active response to stop.")
 
     def _start_dispatch(self, text: str) -> None:
-        task = asyncio.create_task(self._dispatch(text))
-        self.streams.register(self.room_id, task)
+        asyncio.create_task(self._dispatch(text))
 
     async def _dispatch(self, text: str) -> None:
         self.status_text = "Thinking…"
-        task = asyncio.current_task()
         try:
-            result = await self.graph.ainvoke(self.room_id, text)
+            result = await dispatch_graph(self.graph, self.streams, self.room_id, text)
         except asyncio.CancelledError:
             if not self._stop_requested:
                 self._append_system("Cancelled.")
@@ -186,8 +184,6 @@ class YabotCLIApp(App):
         else:
             self._apply_result(result)
         finally:
-            if task is not None:
-                self.streams.clear(self.room_id, task)
             self._stop_requested = False
             self.status_text = "Ready"
 
@@ -195,14 +191,11 @@ class YabotCLIApp(App):
         for body in result.get("responses", []) or []:
             self._append_message("Yabot", body)
 
-        active = result.get("active")
-        conversations = result.get("conversations", {})
-        if active:
-            self.active_conversation = active
-            conv = conversations.get(active, {})
-            model = conv.get("model")
-            if model:
-                self.active_model = model
+        conv_id, model = active_conversation_meta(result)
+        if conv_id:
+            self.active_conversation = conv_id
+        if model:
+            self.active_model = model
 
 
 def run() -> None:

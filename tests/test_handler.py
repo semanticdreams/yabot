@@ -2,7 +2,8 @@ import asyncio
 
 import pytest
 
-from yabot.handler import BotHandler, StreamRegistry
+from yabot.handler import BotHandler
+from yabot.streams import StreamRegistry
 
 
 class DummyRoom:
