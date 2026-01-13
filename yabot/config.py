@@ -23,6 +23,7 @@ class Config:
     creds_path: str
     nio_store_dir: str
     daemon_url: str | None
+    cli_daemon_autostart: bool
 
 
 def load_config() -> Config:
@@ -37,6 +38,9 @@ def load_config() -> Config:
     allowed_users = [u.strip() for u in allowed_users_raw.split(",") if u.strip()]
     cross_signing_reset = os.environ.get("CROSS_SIGNING_RESET", "").strip().lower() in {"1", "true", "yes"}
     daemon_url = os.environ.get("YABOT_DAEMON_URL")
+    cli_daemon_autostart = (
+        os.environ.get("YABOT_CLI_DAEMON_AUTOSTART", "").strip().lower() in {"1", "true", "yes"}
+    )
 
     available_models = [
         "gpt-4o-mini",
@@ -73,4 +77,5 @@ def load_config() -> Config:
         creds_path=creds_path,
         nio_store_dir=nio_store_dir,
         daemon_url=daemon_url,
+        cli_daemon_autostart=cli_daemon_autostart,
     )

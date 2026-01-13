@@ -85,3 +85,7 @@ def run() -> None:
     port = 8765
     logging.info("Starting Yabot daemon on ws://%s:%d", host, port)
     asyncio.run(serve(host, port, graph))
+
+
+if __name__ == "__main__":
+    run()

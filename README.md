@@ -18,6 +18,7 @@
 - `ALLOWED_USERS`: comma-separated allowlist; empty means allow all.
 - `CROSS_SIGNING_RESET`: set to `1`/`true`/`yes` to force a cross-signing reset.
 - `YABOT_DAEMON_URL`: when set, the CLI and Matrix bot connect to a running daemon instead of running the agent locally.
+- `YABOT_CLI_DAEMON_AUTOSTART`: when set to `1`/`true`/`yes`, the CLI will start the daemon if it is not reachable.
 
 ## Daemon mode (shared state)
 

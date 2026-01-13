@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+import subprocess
+import sys
+from typing import Any, Callable
 
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, VerticalScroll
@@ -27,6 +29,34 @@ class ChatLog(VerticalScroll):
         self.messages.append((role, text))
         self.mount(Static(f"{role}: {text}", classes=f"message {role_class}"))
         self.scroll_end(animate=False)
+
+
+async def ensure_daemon(
+    client: RemoteGraphClient,
+    autostart: bool,
+    spawn: Callable[[], None],
+    retries: int = 5,
+    delay: float = 0.2,
+) -> None:
+    last_error: Exception | None = None
+    spawned = False
+    for _ in range(retries):
+        try:
+            await client.connect()
+            return
+        except Exception as exc:
+            last_error = exc
+            if autostart and not spawned:
+                spawn()
+                spawned = True
+            if delay:
+                await asyncio.sleep(delay)
+    if last_error:
+        raise last_error
+
+
+def _spawn_daemon() -> None:
+    subprocess.Popen([sys.executable, "-m", "yabot.daemon"])
 
 
 class YabotCLIApp(App):
@@ -85,6 +115,7 @@ class YabotCLIApp(App):
         room_id: str = "cli",
         available_models: list[str] | None = None,
         default_model: str | None = None,
+        daemon_autostart: bool = False,
     ) -> None:
         super().__init__()
         self.graph = graph
@@ -93,6 +124,7 @@ class YabotCLIApp(App):
         self.available_models = available_models or []
         self.default_model = default_model or (self.available_models[0] if self.available_models else "-")
         self._stop_requested = False
+        self.daemon_autostart = daemon_autostart
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -108,7 +140,11 @@ class YabotCLIApp(App):
         self.query_one("#chat-input", Input).focus()
         self._append_system("Welcome to Yabot CLI. Type !help for commands.")
         if isinstance(self.graph, RemoteGraphClient):
-            await self.graph.connect()
+            try:
+                await ensure_daemon(self.graph, self.daemon_autostart, _spawn_daemon)
+            except Exception as exc:
+                self.status_text = "Daemon unavailable"
+                self._append_system(f"Daemon unavailable: {exc}")
 
     async def on_shutdown(self) -> None:
         if isinstance(self.graph, RemoteGraphClient):
@@ -219,5 +255,6 @@ def run() -> None:
         graph=graph,
         available_models=config.available_models,
         default_model=config.default_model,
+        daemon_autostart=config.cli_daemon_autostart,
     )
     app.run()
