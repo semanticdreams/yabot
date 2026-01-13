@@ -17,6 +17,7 @@ from .interaction import dispatch_graph, is_stop_command, request_stop
 from .remote import RemoteGraphClient
 from .runtime import build_graph
 from .streams import StreamRegistry
+from .tokens import context_window_for_model, estimate_messages_tokens, get_encoding, output_reserve_tokens
 
 
 class ChatLog(VerticalScroll):
@@ -108,6 +109,7 @@ class YabotCLIApp(App):
     status_text = reactive("Ready")
     active_conversation = reactive("-")
     active_model = reactive("-")
+    context_left = reactive("-")
 
     def __init__(
         self,
@@ -159,6 +161,9 @@ class YabotCLIApp(App):
     def watch_active_model(self, _old: str, _new: str) -> None:
         self._update_status()
 
+    def watch_context_left(self, _old: str, _new: str) -> None:
+        self._update_status()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         event.input.value = ""
@@ -201,7 +206,9 @@ class YabotCLIApp(App):
     def _update_status(self) -> None:
         status = self.query_one("#status", Static)
         status.update(
-            f"Status: {self.status_text} | Conversation: {self.active_conversation} | Model: {self.active_model}"
+            "Status: "
+            f"{self.status_text} | Conversation: {self.active_conversation} | Model: {self.active_model} | "
+            f"Context: {self.context_left}"
         )
 
     async def _handle_stop(self) -> None:
@@ -239,6 +246,24 @@ class YabotCLIApp(App):
             self.active_conversation = conv_id
         if model:
             self.active_model = model
+        self.context_left = self._context_left(result, model, conv_id)
+
+    def _context_left(self, result: dict[str, Any], model: str | None, conv_id: str | None) -> str:
+        if not model or not conv_id:
+            return "-"
+        conversations = result.get("conversations", {})
+        conv = conversations.get(conv_id, {})
+        messages = conv.get("messages", [])
+        if not isinstance(messages, list):
+            return "-"
+        context_window = context_window_for_model(model)
+        reserve = output_reserve_tokens(context_window)
+        input_budget = max(1, context_window - reserve)
+        encoding = get_encoding(model)
+        used = estimate_messages_tokens(messages, encoding)
+        remaining = max(0, input_budget - used)
+        percent = int((remaining / input_budget) * 100)
+        return f"{percent}% left"
 
 
 def run() -> None:
