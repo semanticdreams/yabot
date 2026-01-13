@@ -1,6 +1,7 @@
 import asyncio
 import json
 import uuid
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -103,6 +104,71 @@ class YabotGraph:
         if tool_calls:
             msg["tool_calls"] = self._tool_calls_to_dicts(tool_calls)
         return msg
+
+    def _agents_message(self, path: Path, content: str) -> dict[str, Any]:
+        return {
+            "role": "system",
+            "content": f"AGENTS.md instructions from {path}:\n{content}",
+        }
+
+    def _read_agents_file(self, directory: Path) -> tuple[Path, str] | None:
+        agents_path = directory / "AGENTS.md"
+        try:
+            content = agents_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        content = content.strip()
+        if not content:
+            return None
+        return agents_path, content
+
+    def _inject_agents_messages(
+        self,
+        agents_loaded: List[str],
+        messages: List[dict[str, Any]],
+        paths: List[Path],
+    ) -> List[dict[str, Any]]:
+        injected: List[dict[str, Any]] = []
+        for directory in paths:
+            directory = directory.expanduser().resolve(strict=False)
+            result = self._read_agents_file(directory)
+            if not result:
+                continue
+            agents_path, content = result
+            key = str(agents_path)
+            if key in agents_loaded:
+                continue
+            agents_loaded.append(key)
+            msg = self._agents_message(agents_path, content)
+            messages.append(msg)
+            injected.append(msg)
+        return injected
+
+    def _agents_paths_for_tool_calls(self, tool_calls: List[dict[str, Any]]) -> List[Path]:
+        paths: List[Path] = []
+        for call in tool_calls:
+            function = call.get("function") or {}
+            name = function.get("name") or ""
+            raw_args = function.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                continue
+
+            if name == "run_shell":
+                workdir = args.get("workdir")
+                if isinstance(workdir, str) and workdir:
+                    paths.append(Path(workdir))
+                continue
+
+            if name in {"list_dir", "read_file", "write_file", "create_dir"}:
+                required_dir = self._required_dir_for_tool(name, args)
+                if required_dir:
+                    paths.append(required_dir)
+
+        return paths
 
     def _required_dir_for_tool(self, name: str, args: dict[str, Any]) -> Path | None:
         path = args.get("path")
@@ -233,6 +299,7 @@ class YabotGraph:
         model: str,
         messages: List[dict[str, Any]],
         trace_ctx: dict[str, Any],
+        agents_loaded: List[str],
         initial_tool_calls: List[dict[str, Any]] | None = None,
         initial_assistant: dict[str, Any] | None = None,
     ) -> tuple[List[str], List[dict[str, Any]] | None, dict[str, Any] | None]:
@@ -297,6 +364,12 @@ class YabotGraph:
                         "tool_calls": tool_calls,
                     }
 
+                agent_paths = self._agents_paths_for_tool_calls(tool_calls)
+                if agent_paths:
+                    injected = self._inject_agents_messages(agents_loaded, working_messages, agent_paths)
+                    if injected:
+                        new_messages.extend(injected)
+
                 tool_messages, system_messages = await self._execute_tool_calls(tool_calls, trace_ctx)
                 new_messages.extend(tool_messages)
                 working_messages.extend(tool_messages)
@@ -323,8 +396,12 @@ class YabotGraph:
 
         conv_id, conv = room_active_conv(state)
         model = conv.get("model", self.default_model)
+        agents_loaded = conv.setdefault("agents_loaded", [])
         trace_ctx.update({"conv_id": conv_id, "model": model})
         self._ensure_system_prompt(conv)
+        conv_messages = conv.get("messages", [])
+        self._inject_agents_messages(agents_loaded, conv_messages, [Path(os.getcwd())])
+        conv["messages"] = conv_messages
 
         if self.tracer:
             self.tracer.log("incoming", {"text": incoming}, context=trace_ctx)
@@ -352,6 +429,7 @@ class YabotGraph:
                     model,
                     base_messages,
                     trace_ctx,
+                    agents_loaded,
                 )
                 if pending_next:
                     state["approvals"]["pending"] = pending_next
@@ -378,6 +456,7 @@ class YabotGraph:
                     model,
                     conv.get("messages", []),
                     trace_ctx,
+                    agents_loaded,
                     initial_tool_calls=pending.get("tool_calls"),
                     initial_assistant=pending.get("assistant"),
                 )
@@ -412,6 +491,7 @@ class YabotGraph:
                     model,
                     base_messages,
                     trace_ctx,
+                    agents_loaded,
                 )
                 if pending_next:
                     state["approvals"]["pending"] = pending_next
@@ -446,6 +526,7 @@ class YabotGraph:
             model,
             conv.get("messages", []),
             trace_ctx,
+            agents_loaded,
         )
         if pending_next:
             state["approvals"]["pending"] = pending_next
