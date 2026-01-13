@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import contextlib
 import logging
 import os
 import sys
@@ -10,6 +9,10 @@ import time
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TextIO
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.shortcuts import print_formatted_text
+from prompt_toolkit.patch_stdout import patch_stdout
 
 from .cli_runtime import ensure_daemon, spawn_daemon
 from .config import load_config
@@ -54,12 +57,11 @@ class YabotCLI:
         self._daemon_state = self.DaemonState.UNKNOWN
         self._stop_requested = False
         self._pending_tasks: set[asyncio.Task[None]] = set()
-        self._queue: asyncio.Queue[str | None] = asyncio.Queue()
-        self._reader_task: asyncio.Task[None] | None = None
         self._print_lock = asyncio.Lock()
-        self.input_fn = input_fn or input
+        self.input_fn = input_fn
         self.output = output or sys.stdout
         self.prompt = prompt
+        self._pt_session: PromptSession | None = None
 
     def run(self) -> None:
         logging.basicConfig(
@@ -74,48 +76,63 @@ class YabotCLI:
     async def run_async(self) -> None:
         await self._print("[system] Welcome to Yabot CLI. Type !help for commands.")
         await self._ensure_remote()
-        self._reader_task = asyncio.create_task(self._read_input())
         try:
-            while True:
-                line = await self._queue.get()
-                if line is None:
-                    break
-                text = line.strip()
-                if not text:
-                    continue
-                if is_stop_command(text):
-                    await self._handle_stop()
-                    continue
-                self._start_dispatch(text)
-                await asyncio.sleep(0)
+            if self.input_fn is None:
+                await self._prompt_toolkit_loop()
+            else:
+                await self._input_fn_loop()
         finally:
-            if self._reader_task is not None:
-                self._reader_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._reader_task
             await self._drain_pending()
             await self._close_remote()
             await self._print("[system] Shutdown complete.")
 
-    async def _read_input(self) -> None:
+    async def _input_fn_loop(self) -> None:
         while True:
             try:
                 line = await asyncio.to_thread(self._call_input)
             except EOFError:
                 await self._print("[system] Input closed.")
-                await self._queue.put(None)
                 return
             if line is None:
                 await self._print("[system] Input closed.")
-                await self._queue.put(None)
                 return
-            await self._queue.put(str(line))
+            await self._handle_line(str(line))
+
+    async def _prompt_toolkit_loop(self) -> None:
+        session = PromptSession()
+        self._pt_session = session
+        try:
+            with patch_stdout():
+                while True:
+                    try:
+                        line = await session.prompt_async(self.prompt)
+                    except EOFError:
+                        await self._print("[system] Input closed.")
+                        return
+                    except KeyboardInterrupt:
+                        await self._print("[system] Input cancelled.")
+                        continue
+                    await self._handle_line(line)
+        finally:
+            self._pt_session = None
 
     def _call_input(self) -> str:
         try:
+            assert self.input_fn is not None
             return self.input_fn(self.prompt)
         except TypeError:
+            assert self.input_fn is not None
             return self.input_fn()  # type: ignore[misc]
+
+    async def _handle_line(self, line: str) -> None:
+        text = line.strip()
+        if not text:
+            return
+        if is_stop_command(text):
+            await self._handle_stop()
+            return
+        self._start_dispatch(text)
+        await asyncio.sleep(0)
 
     def _start_dispatch(self, text: str) -> None:
         graph_task = asyncio.create_task(self.graph.ainvoke(self.room_id, text))
@@ -157,7 +174,10 @@ class YabotCLI:
 
     async def _print(self, text: str) -> None:
         async with self._print_lock:
-            print(text, file=self.output, flush=True)
+            if self._pt_session is not None:
+                print_formatted_text(text, output=self._pt_session.output)
+            else:
+                print(text, file=self.output, flush=True)
 
     async def _ensure_remote(self) -> None:
         if not isinstance(self.graph, RemoteGraphClient):
