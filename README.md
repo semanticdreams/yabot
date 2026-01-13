@@ -3,7 +3,8 @@
 ## Running
 
 - Install dependencies: `uv pip install -e .`
-- Run locally: `uv run --project . yabot`
+- Run Matrix bot: `uv run --project . yabot`
+- Run CLI: `uv run --project . yabot-cli`
 - Tool install (refresh tool env): `uv tool install --force --editable .`
 
 ## Environment variables
@@ -15,6 +16,20 @@
 - `BOT_NAME`: defaults to `yabot`.
 - `ALLOWED_USERS`: comma-separated allowlist; empty means allow all.
 - `CROSS_SIGNING_RESET`: set to `1`/`true`/`yes` to force a cross-signing reset.
+
+## CLI usage
+
+The CLI uses Textual and supports the same commands as the Matrix bot. Use `!help` to see them.
+
+Key bindings:
+
+- `Ctrl+N`: new conversation
+- `Ctrl+R`: reset conversation
+- `Ctrl+L`: list conversations
+- `Ctrl+M`: list models
+- `Ctrl+S`: stop current response
+- `Ctrl+H`: show help
+- `Ctrl+Q`: quit
 
 ## Allowlist behavior
 

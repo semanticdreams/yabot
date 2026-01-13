@@ -11,11 +11,13 @@ dependencies = [
     "openai>=2.15.0",
     "pynacl>=1.5.0",
     "python-dotenv>=1.2.1",
+    "textual>=0.74.0",
     "tiktoken>=0.12.0",
 ]
 
 [project.scripts]
 yabot = "yabot.app:run"
+yabot-cli = "yabot.cli:run"
 
 [project.optional-dependencies]
 test = [

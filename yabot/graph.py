@@ -16,6 +16,7 @@ from .commands import (
 from .llm import LLMClient
 from .skills import SkillRegistry
 from .tools import TOOLS, execute_tool
+from .tools.util import truncate
 
 
 class GraphState(TypedDict, total=False):
@@ -182,8 +183,13 @@ class YabotGraph:
                         result = f"Skill applied: {skill.name}"
                     else:
                         result = f"ERROR: unknown skill tool {name}"
+                elif name == "run_shell":
+                    result = await self._run_shell_async(
+                        str(arguments.get("command", "")),
+                        arguments.get("workdir"),
+                    )
                 else:
-                    result = await asyncio.to_thread(execute_tool, name, arguments)
+                    result = execute_tool(name, arguments)
             tool_messages.append(
                 {
                     "role": "tool",
@@ -192,6 +198,31 @@ class YabotGraph:
                 }
             )
         return tool_messages, system_messages
+
+    async def _run_shell_async(self, command: str, workdir: Optional[str]) -> str:
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=workdir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                raise
+            payload = {
+                "command": command,
+                "workdir": workdir,
+                "returncode": proc.returncode,
+                "stdout": truncate(stdout.decode(errors="replace")),
+                "stderr": truncate(stderr.decode(errors="replace")),
+            }
+            return json.dumps(payload)
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "command": command, "workdir": workdir})
 
     async def _run_llm_loop(
         self,
