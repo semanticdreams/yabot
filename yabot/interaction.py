@@ -25,6 +25,8 @@ async def dispatch_graph(
     on_start: Callable[[], Awaitable[None]] | None = None,
     on_done: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
+    assert room_id, "room_id is required"
+    assert text is not None, "text is required"
     if on_start:
         await on_start()
     task = asyncio.create_task(graph.ainvoke(room_id, text))

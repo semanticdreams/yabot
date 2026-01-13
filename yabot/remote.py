@@ -50,6 +50,8 @@ class RemoteGraphClient:
         return False
 
     async def ainvoke(self, room_id: str, text: str) -> dict[str, Any]:
+        assert room_id, "room_id must be set"
+        assert text is not None, "text must be set"
         await self.connect()
         assert self._ws is not None
         request_id = str(uuid.uuid4())
@@ -61,6 +63,9 @@ class RemoteGraphClient:
         return await future
 
     async def ainvoke_stream(self, room_id: str, text: str, on_token: Any) -> dict[str, Any]:
+        assert room_id, "room_id must be set"
+        assert text is not None, "text must be set"
+        assert callable(on_token), "on_token must be callable"
         await self.connect()
         assert self._ws is not None
         request_id = str(uuid.uuid4())
@@ -76,6 +81,7 @@ class RemoteGraphClient:
             self._stream_callbacks.pop(request_id, None)
 
     async def stop(self, room_id: str) -> bool:
+        assert room_id, "room_id must be set"
         await self.connect()
         assert self._ws is not None
         request_id = str(uuid.uuid4())
@@ -102,6 +108,7 @@ class RemoteGraphClient:
                     if callback and chunk is not None:
                         await callback(chunk)
                     continue
+                assert request_id in self._pending, "response id missing from pending"
                 future = self._pending.pop(request_id)
                 if msg_type == "response":
                     self._stream_callbacks.pop(request_id, None)

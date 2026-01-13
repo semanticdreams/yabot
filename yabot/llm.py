@@ -1,3 +1,4 @@
+import json
 from typing import Any, Awaitable, Callable, Dict, List
 
 from openai import AsyncOpenAI
@@ -10,12 +11,16 @@ class LLMClient:
         self.client = AsyncOpenAI(api_key=api_key)
 
     async def create_message(self, model: str, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]] | None = None):
+        assert model, "model must be set"
+        assert isinstance(messages, list), "messages must be a list"
         response = await self.client.chat.completions.create(
             model=model,
             messages=messages,
             tools=tools or TOOLS,
             tool_choice="auto",
         )
+        assert response.choices, "LLM response missing choices"
+        assert response.choices[0].message is not None, "LLM response missing message"
         return response.choices[0].message
 
     async def create_message_stream(
@@ -25,6 +30,8 @@ class LLMClient:
         tools: List[Dict[str, Any]] | None = None,
         on_token: Callable[[str], Awaitable[None]] | None = None,
     ) -> Dict[str, Any]:
+        assert model, "model must be set"
+        assert isinstance(messages, list), "messages must be a list"
         response = await self.client.chat.completions.create(
             model=model,
             messages=messages,
@@ -32,6 +39,7 @@ class LLMClient:
             tool_choice="auto",
             stream=True,
         )
+        assert response is not None, "LLM stream response is None"
         content_chunks: List[str] = []
         tool_calls_by_index: Dict[int, Dict[str, Any]] = {}
         async for event in response:
@@ -64,7 +72,24 @@ class LLMClient:
                     if arguments:
                         entry["function"]["arguments"] += arguments
         tool_calls = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
-        message: Dict[str, Any] = {"role": "assistant", "content": "".join(content_chunks) or None}
+        content = "".join(content_chunks) or None
+        if tool_calls:
+            for call in tool_calls:
+                arguments = (call.get("function") or {}).get("arguments") or ""
+                if arguments:
+                    try:
+                        json.loads(arguments)
+                    except json.JSONDecodeError:
+                        message = await self.create_message(model, messages, tools=tools)
+                        return {
+                            "role": message.role,
+                            "content": message.content,
+                            "tool_calls": getattr(message, "tool_calls", None),
+                        }
+        if content is None and not tool_calls:
+            message = await self.create_message(model, messages, tools=tools)
+            return {"role": message.role, "content": message.content, "tool_calls": getattr(message, "tool_calls", None)}
+        message: Dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             message["tool_calls"] = tool_calls
         return message

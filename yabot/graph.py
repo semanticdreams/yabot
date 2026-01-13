@@ -102,7 +102,7 @@ class YabotGraph:
             if hasattr(call, "model_dump"):
                 data = call.model_dump()
             elif isinstance(call, dict):
-                data = call
+                data = dict(call)
             else:
                 fn = getattr(call, "function", None)
                 data = {
@@ -112,8 +112,21 @@ class YabotGraph:
                         "arguments": getattr(fn, "arguments", "{}"),
                     },
                 }
+            if "type" not in data:
+                data["type"] = "function"
+            name = (data.get("function") or {}).get("name", "")
+            assert name, "tool_call missing function name"
             normalized.append(data)
         return normalized
+
+    def _tool_call_notices(self, tool_calls: List[dict[str, Any]]) -> List[str]:
+        notices: List[str] = []
+        for call in tool_calls:
+            function = call.get("function") or {}
+            name = function.get("name") or "unknown"
+            raw_args = function.get("arguments") or "{}"
+            notices.append(f"[system] Tool call: {name} {raw_args}")
+        return notices
 
     @staticmethod
     def _is_complex_task(text: str) -> bool:
@@ -198,13 +211,15 @@ class YabotGraph:
             conv_messages.append(user_msg)
             conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
 
-            step_responses, new_messages, pending_next = await self._run_llm_loop(
+            step_responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
                 state,
                 model,
                 conv.get("messages", []),
                 trace_ctx,
                 agents_loaded,
             )
+            if tool_notices:
+                responses.extend(tool_notices)
             responses.extend(step_responses)
 
             if pending_next:
@@ -226,8 +241,10 @@ class YabotGraph:
 
     def _message_to_dict(self, message: Any) -> dict[str, Any]:
         if isinstance(message, dict):
+            role = message.get("role", "assistant")
+            assert role in {"assistant", "system", "user", "tool"}, f"invalid role: {role}"
             msg: dict[str, Any] = {
-                "role": message.get("role", "assistant"),
+                "role": role,
                 "content": message.get("content"),
             }
             tool_calls = message.get("tool_calls")
@@ -235,10 +252,63 @@ class YabotGraph:
                 msg["tool_calls"] = self._tool_calls_to_dicts(tool_calls)
             return msg
         msg: dict[str, Any] = {"role": message.role, "content": message.content}
+        assert msg["role"] in {"assistant", "system", "user", "tool"}, f"invalid role: {msg['role']}"
         tool_calls = getattr(message, "tool_calls", None)
         if tool_calls:
             msg["tool_calls"] = self._tool_calls_to_dicts(tool_calls)
         return msg
+
+    @staticmethod
+    def _assistant_without_tool_calls(message: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not message:
+            return None
+        if message.get("role") != "assistant":
+            return message
+        if not message.get("tool_calls"):
+            return message
+        content = message.get("content")
+        if not content:
+            return None
+        return {"role": "assistant", "content": content}
+
+    def _normalize_messages_for_llm(self, messages: List[dict[str, Any]]) -> List[dict[str, Any]]:
+        normalized: List[dict[str, Any]] = []
+        index = 0
+        total = len(messages)
+        while index < total:
+            msg = messages[index]
+            if msg.get("role") == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                assert tool_call_id, "tool message missing tool_call_id"
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                tool_calls = self._tool_calls_to_dicts(msg.get("tool_calls"))
+                expected_ids = [c.get("id") for c in tool_calls if c.get("id")]
+                tool_block: List[dict[str, Any]] = []
+                tool_ids: set[str] = set()
+                j = index + 1
+                while j < total and messages[j].get("role") == "tool":
+                    tool_block.append(messages[j])
+                    tool_call_id = messages[j].get("tool_call_id")
+                    if tool_call_id:
+                        tool_ids.add(tool_call_id)
+                    j += 1
+                if expected_ids and all(tid in tool_ids for tid in expected_ids):
+                    copy = dict(msg)
+                    copy["tool_calls"] = tool_calls
+                    normalized.append(copy)
+                    normalized.extend(tool_block)
+                else:
+                    stripped = self._assistant_without_tool_calls(msg)
+                    if stripped:
+                        normalized.append(stripped)
+                index = j
+                continue
+            if msg.get("role") == "tool":
+                index += 1
+                continue
+            normalized.append(msg)
+            index += 1
+        return normalized
 
     def _agents_message(self, path: Path, content: str) -> dict[str, Any]:
         return {
@@ -389,6 +459,16 @@ class YabotGraph:
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
+            assert name, "tool call missing name"
+            assert self.skills.is_skill_tool(name) or name in {
+                "ask_user",
+                "list_dir",
+                "read_file",
+                "write_file",
+                "create_dir",
+                "get_skills_dir",
+                "run_shell",
+            }, f"unknown tool: {name}"
             raw_args = function.get("arguments") or "{}"
             try:
                 arguments = json.loads(raw_args)
@@ -437,9 +517,10 @@ class YabotGraph:
         agents_loaded: List[str],
         initial_tool_calls: List[dict[str, Any]] | None = None,
         initial_assistant: dict[str, Any] | None = None,
-    ) -> tuple[List[str], List[dict[str, Any]] | None, dict[str, Any] | None]:
+    ) -> tuple[List[str], List[dict[str, Any]] | None, dict[str, Any] | None, List[str]]:
         working_messages = list(messages)
         new_messages: List[dict[str, Any]] = []
+        tool_notices: List[str] = []
         tool_calls = initial_tool_calls
         assistant_message = initial_assistant
 
@@ -456,33 +537,41 @@ class YabotGraph:
                         "llm_request",
                         {
                             "model": model,
-                            "messages": working_messages,
+                            "messages": self._normalize_messages_for_llm(working_messages),
                             "tools": [t.get("function", {}).get("name") for t in self.base_tools + self.skill_tools],
                         },
                         context=trace_ctx,
                     )
                 stream_callback = self._stream_callback.get()
+                safe_messages = self._normalize_messages_for_llm(working_messages)
                 if stream_callback:
                     message = await self.llm.create_message_stream(
                         model,
-                        working_messages,
+                        safe_messages,
                         tools=self.base_tools + self.skill_tools,
                         on_token=stream_callback,
                     )
                 else:
                     message = await self.llm.create_message(
-                        model, working_messages, tools=self.base_tools + self.skill_tools
+                        model, safe_messages, tools=self.base_tools + self.skill_tools
                     )
                 assistant_message = self._message_to_dict(message)
                 if self.tracer:
                     self.tracer.log("llm_response", {"message": assistant_message}, context=trace_ctx)
                 new_messages.append(assistant_message)
                 working_messages.append(assistant_message)
-                tool_calls = self._tool_calls_to_dicts(getattr(message, "tool_calls", None))
+                if isinstance(message, dict):
+                    raw_tool_calls = message.get("tool_calls")
+                else:
+                    raw_tool_calls = getattr(message, "tool_calls", None)
+                tool_calls = self._tool_calls_to_dicts(raw_tool_calls)
                 if self.tracer and tool_calls:
                     self.tracer.log("tool_calls", {"calls": tool_calls}, context=trace_ctx)
 
             if tool_calls:
+                notices = self._tool_call_notices(tool_calls)
+                if notices:
+                    tool_notices.extend(notices)
                 for call in tool_calls:
                     function = call.get("function") or {}
                     name = function.get("name") or ""
@@ -496,7 +585,7 @@ class YabotGraph:
                         return [question], None, {
                             "request": {"kind": "ask_user", "tool_call_id": call.get("id", "")},
                             "assistant": assistant_message,
-                        }
+                        }, tool_notices
 
                 missing = self._first_missing_approval(state, tool_calls)
                 if missing:
@@ -506,7 +595,7 @@ class YabotGraph:
                         "request": missing,
                         "assistant": assistant_message,
                         "tool_calls": tool_calls,
-                    }
+                    }, tool_notices
 
                 agent_paths = self._agents_paths_for_tool_calls(tool_calls)
                 if agent_paths:
@@ -530,7 +619,7 @@ class YabotGraph:
                 responses = ["…(no output)"]
             if self.tracer:
                 self.tracer.log("response_final", {"responses": responses}, context=trace_ctx)
-            return responses, new_messages, None
+            return responses, new_messages, None, tool_notices
 
     async def _process_input(self, state: Dict[str, Any]) -> Dict[str, Any]:
         incoming = (state.get("incoming") or "").strip()
@@ -568,13 +657,15 @@ class YabotGraph:
                 if assistant_message:
                     base_messages.append(assistant_message)
                 base_messages.append(tool_message)
-                responses, new_messages, pending_next = await self._run_llm_loop(
+                responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
                     state,
                     model,
                     base_messages,
                     trace_ctx,
                     agents_loaded,
                 )
+                if tool_notices:
+                    responses = tool_notices + responses
                 if pending_next:
                     state["approvals"]["pending"] = pending_next
                 elif new_messages is not None:
@@ -595,7 +686,7 @@ class YabotGraph:
                 state["approvals"]["pending"] = None
                 _, conv = room_active_conv(state)
                 model = conv.get("model", self.default_model)
-                responses, new_messages, pending_next = await self._run_llm_loop(
+                responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
                     state,
                     model,
                     conv.get("messages", []),
@@ -604,6 +695,8 @@ class YabotGraph:
                     initial_tool_calls=pending.get("tool_calls"),
                     initial_assistant=pending.get("assistant"),
                 )
+                if tool_notices:
+                    responses = tool_notices + responses
                 if pending_next:
                     state["approvals"]["pending"] = pending_next
                 elif new_messages is not None:
@@ -622,27 +715,31 @@ class YabotGraph:
                 model = conv.get("model", self.default_model)
                 base_messages = list(conv.get("messages", []))
                 assistant_message = pending.get("assistant")
-                if assistant_message:
-                    base_messages.append(assistant_message)
+                stripped = self._assistant_without_tool_calls(assistant_message)
+                if stripped:
+                    base_messages.append(stripped)
                 base_messages.append(
                     {
                         "role": "user",
                         "content": f"Approval denied. Feedback: {incoming}",
                     }
                 )
-                responses, new_messages, pending_next = await self._run_llm_loop(
+                responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
                     state,
                     model,
                     base_messages,
                     trace_ctx,
                     agents_loaded,
                 )
+                if tool_notices:
+                    responses = tool_notices + responses
                 if pending_next:
                     state["approvals"]["pending"] = pending_next
                 elif new_messages is not None:
                     conv_messages = list(conv.get("messages", []))
-                    if assistant_message:
-                        conv_messages.append(assistant_message)
+                    stripped = self._assistant_without_tool_calls(assistant_message)
+                    if stripped:
+                        conv_messages.append(stripped)
                     conv_messages.append(base_messages[-1])
                     conv_messages.extend(new_messages)
                     conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
@@ -696,13 +793,15 @@ class YabotGraph:
                 state["responses"] = responses
                 return state
         else:
-            responses, new_messages, pending_next = await self._run_llm_loop(
+            responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
                 state,
                 model,
                 conv.get("messages", []),
                 trace_ctx,
                 agents_loaded,
             )
+            if tool_notices:
+                responses = tool_notices + responses
             if pending_next:
                 state["approvals"]["pending"] = pending_next
             elif new_messages is not None:

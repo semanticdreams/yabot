@@ -6,6 +6,7 @@ from .util import truncate
 
 
 def run_shell(command: str, workdir: str | None = None) -> str:
+    assert command, "command is required"
     try:
         result = subprocess.run(
             command,
@@ -28,6 +29,7 @@ def run_shell(command: str, workdir: str | None = None) -> str:
 
 
 async def run_shell_async(command: str, workdir: str | None = None) -> str:
+    assert command, "command is required"
     try:
         proc = await asyncio.create_subprocess_shell(
             command,

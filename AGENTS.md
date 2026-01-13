@@ -25,3 +25,6 @@ Do not add features that bypass this trace logging.
 Trace schema updates:
 - `plan_request`: emitted before automatic planning. Keys: `model`, `text`.
 - `plan_created`: emitted after automatic planning. Keys: `steps`, `count`.
+
+Assertion policy:
+- Prefer hard `assert` statements over fallback behavior across modules to enforce invariants.

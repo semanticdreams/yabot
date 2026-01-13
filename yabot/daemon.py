@@ -36,13 +36,18 @@ class YabotDaemon:
                     continue
 
                 msg_type = payload.get("type")
+                assert msg_type in {"message", "stop"}, f"unknown message type: {msg_type}"
                 if msg_type == "message":
+                    assert payload.get("id"), "message id is required"
+                    assert payload.get("room_id"), "room_id is required"
                     task = asyncio.create_task(self._handle_message(websocket, payload))
                     tasks.add(task)
                     task.add_done_callback(tasks.discard)
                     continue
 
                 if msg_type == "stop":
+                    assert payload.get("id"), "stop id is required"
+                    assert payload.get("room_id"), "room_id is required"
                     room_id = str(payload.get("room_id", ""))
                     request_id = payload.get("id")
                     ok = self.streams.stop(room_id)
@@ -67,6 +72,8 @@ class YabotDaemon:
         request_id = str(payload.get("id", ""))
         room_id = str(payload.get("room_id", ""))
         text = str(payload.get("text", ""))
+        assert request_id, "request id is required"
+        assert room_id, "room_id is required"
         try:
             async def on_token(chunk: str) -> None:
                 await websocket.send(

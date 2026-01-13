@@ -3,6 +3,7 @@ import os
 
 
 def list_dir(path: str) -> str:
+    assert path, "path is required"
     try:
         entries = []
         for name in sorted(os.listdir(path)):

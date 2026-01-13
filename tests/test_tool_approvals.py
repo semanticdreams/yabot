@@ -83,12 +83,12 @@ async def test_run_shell_requires_approval_and_remembers(tmp_path: Path):
     result = await graph.ainvoke("room1", "run")
 
     assert not out_path.exists()
-    assert "Approve running shell command" in result["responses"][0]
+    assert any("Approve running shell command" in r for r in result["responses"])
 
     result = await graph.ainvoke("room1", " y ")
 
     assert out_path.exists()
-    assert result["responses"][0] == "done"
+    assert "done" in result["responses"]
     approvals = result["approvals"]["shell"]
     assert f"{json.loads(args)['command']}\n{str(tmp_path)}" in approvals
 
@@ -112,7 +112,7 @@ async def test_run_shell_denied_with_feedback(tmp_path: Path):
     result = await graph.ainvoke("room1", "nope")
 
     assert not out_path.exists()
-    assert result["responses"][0] == "ok"
+    assert "ok" in result["responses"]
     assert result["approvals"]["pending"] is None
 
 
@@ -144,16 +144,16 @@ async def test_fs_tool_approval_scopes_directory(tmp_path: Path):
 
     result = await graph.ainvoke("room1", "read")
 
-    assert "Approve access to directory" in result["responses"][0]
+    assert any("Approve access to directory" in r for r in result["responses"])
 
     result = await graph.ainvoke("room1", "y")
 
-    assert result["responses"][0] == "done1"
+    assert "done1" in result["responses"]
     assert str(tmp_path) in result["approvals"]["dirs"]
 
     result = await graph.ainvoke("room1", "read again")
 
-    assert result["responses"][0] == "done2"
+    assert "done2" in result["responses"]
 
 
 @pytest.mark.asyncio
@@ -173,7 +173,7 @@ async def test_tool_messages_follow_tool_calls(tmp_path: Path):
     )
 
     result = await graph.ainvoke("room1", "read")
-    assert "Approve access to directory" in result["responses"][0]
+    assert any("Approve access to directory" in r for r in result["responses"])
 
     result = await graph.ainvoke("room1", "y")
-    assert result["responses"][0] == "done"
+    assert "done" in result["responses"]

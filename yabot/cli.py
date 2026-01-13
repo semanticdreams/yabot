@@ -9,7 +9,7 @@ import sys
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, Awaitable, Callable, TextIO
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
@@ -140,15 +140,24 @@ class YabotCLI:
         await asyncio.sleep(0)
 
     def _start_dispatch(self, text: str) -> None:
-        graph_task = asyncio.create_task(self.graph.ainvoke(self.room_id, text))
-        self.streams.register(self.room_id, graph_task)
-        task = asyncio.create_task(self._dispatch(graph_task))
+        task = asyncio.create_task(self._dispatch(text))
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
 
-    async def _dispatch(self, graph_task: asyncio.Task[dict[str, Any]]) -> None:
+    async def _dispatch(self, text: str) -> None:
         await self._print("[system] Processing request…")
         completed = False
+        streamed = False
+        ended_with_newline = False
+
+        async def on_token(chunk: str) -> None:
+            nonlocal streamed, ended_with_newline
+            streamed = True
+            ended_with_newline = chunk.endswith("\n")
+            await self._write_llm(chunk)
+
+        graph_task = asyncio.create_task(self._call_graph(text, on_token))
+        self.streams.register(self.room_id, graph_task)
         try:
             result = await graph_task
         except asyncio.CancelledError:
@@ -158,13 +167,27 @@ class YabotCLI:
         except Exception as exc:
             await self._print(f"[system] Error: {exc}")
         else:
-            await self._apply_result(result)
+            if streamed and not ended_with_newline:
+                await self._write_llm("\n")
+            if not streamed:
+                await self._apply_result(result)
             completed = True
         finally:
             self.streams.clear(self.room_id, graph_task)
             self._stop_requested = False
             if completed:
                 await self._print("[system] Response complete.")
+
+    async def _call_graph(self, text: str, on_token: Callable[[str], Awaitable[None]]) -> dict[str, Any]:
+        assert text, "text must be non-empty"
+        assert callable(on_token), "on_token must be callable"
+        stream_fn = getattr(self.graph, "ainvoke_stream", None)
+        if callable(stream_fn):
+            result = await stream_fn(self.room_id, text, on_token=on_token)
+        else:
+            result = await self.graph.ainvoke(self.room_id, text)
+        assert isinstance(result, dict), "graph result must be a dict"
+        return result
 
     async def _apply_result(self, result: dict[str, Any]) -> None:
         for body in result.get("responses", []) or []:
@@ -184,12 +207,24 @@ class YabotCLI:
             else:
                 print(text, file=self.output, flush=True)
 
+    async def _write_llm(self, text: str) -> None:
+        async with self._print_lock:
+            if self._pt_session is not None:
+                print_formatted_text(self._format_llm(text), output=self._pt_session.output, end="", flush=True)
+            else:
+                self.output.write(text)
+                self.output.flush()
+
+    def _format_llm(self, text: str) -> HTML:
+        escaped = html.escape(text)
+        return HTML(f"<ansigreen>{escaped}</ansigreen>")
+
     def _format_text(self, text: str) -> HTML:
         escaped = html.escape(text)
         if text.startswith("[system] Error:"):
             return HTML(f"<ansired>{escaped}</ansired>")
         if text.startswith("[system]"):
-            return HTML(f"<gray>{escaped}</gray>")
+            return HTML(f"<ansibrightblack>{escaped}</ansibrightblack>")
         if text.startswith("[you]"):
             return HTML(f"<ansicyan>{escaped}</ansicyan>")
         return HTML(f"<ansigreen>{escaped}</ansigreen>")

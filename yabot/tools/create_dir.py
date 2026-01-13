@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 def create_dir(path: str, exist_ok: bool) -> str:
+    assert path, "path is required"
     try:
         Path(path).mkdir(parents=True, exist_ok=exist_ok)
         return f"OK: created {path}"

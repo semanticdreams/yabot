@@ -4,6 +4,7 @@ from .util import truncate
 
 
 def read_file(path: str) -> str:
+    assert path, "path is required"
     try:
         data = Path(path).read_bytes()
         text = data.decode("utf-8", errors="replace")

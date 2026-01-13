@@ -93,7 +93,7 @@ async def test_skill_tool_injects_system_message():
     )
 
     result = await graph.ainvoke("room1", "do something")
-    assert result["responses"][0] == "done"
+    assert "done" in result["responses"]
     conv = result["conversations"][result["active"]]["messages"]
     assert any(m.get("role") == "system" and "Use the demo approach." in m.get("content", "") for m in conv)
 
@@ -124,7 +124,7 @@ async def test_ask_user_tool_flow():
     )
 
     result = await graph.ainvoke("room1", "start")
-    assert result["responses"][0] == "More detail?"
+    assert "More detail?" in result["responses"]
 
     result = await graph.ainvoke("room1", "extra details")
     assert result["responses"][0] == "ok"
