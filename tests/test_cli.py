@@ -62,6 +62,8 @@ async def test_cli_prints_response():
     await cli.run_async()
 
     assert "echo: hello" in output.getvalue()
+    assert "[system] Processing request" in output.getvalue()
+    assert "[system] Response complete." in output.getvalue()
     assert graph.calls == [("cli", "hello")]
 
 
@@ -77,6 +79,7 @@ async def test_cli_stop_cancels_active_task():
     await runner
 
     out_text = output.getvalue()
+    assert "[system] Processing request" in out_text
     assert "Stopping current response" in out_text
     assert "done" not in out_text
 
@@ -96,4 +99,5 @@ async def test_cli_context_command_prints_percentage():
 
     await cli.run_async()
 
+    assert "[system] Processing request" in output.getvalue()
     assert "Remaining context:" in output.getvalue()

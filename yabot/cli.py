@@ -95,15 +95,18 @@ class YabotCLI:
                     await self._reader_task
             await self._drain_pending()
             await self._close_remote()
+            await self._print("[system] Shutdown complete.")
 
     async def _read_input(self) -> None:
         while True:
             try:
                 line = await asyncio.to_thread(self._call_input)
             except EOFError:
+                await self._print("[system] Input closed.")
                 await self._queue.put(None)
                 return
             if line is None:
+                await self._print("[system] Input closed.")
                 await self._queue.put(None)
                 return
             await self._queue.put(str(line))
@@ -122,6 +125,8 @@ class YabotCLI:
         task.add_done_callback(self._pending_tasks.discard)
 
     async def _dispatch(self, graph_task: asyncio.Task[dict[str, Any]]) -> None:
+        await self._print("[system] Processing request…")
+        completed = False
         try:
             result = await graph_task
         except asyncio.CancelledError:
@@ -132,9 +137,12 @@ class YabotCLI:
             await self._print(f"[system] Error: {exc}")
         else:
             await self._apply_result(result)
+            completed = True
         finally:
             self.streams.clear(self.room_id, graph_task)
             self._stop_requested = False
+            if completed:
+                await self._print("[system] Response complete.")
 
     async def _apply_result(self, result: dict[str, Any]) -> None:
         for body in result.get("responses", []) or []:
@@ -153,6 +161,7 @@ class YabotCLI:
 
     async def _ensure_remote(self) -> None:
         if not isinstance(self.graph, RemoteGraphClient):
+            await self._print("[system] Running locally.")
             return
         try:
             proc = await ensure_daemon(
