@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import os
 import time
+from enum import Enum
 from typing import Any
 
 from textual.app import App, ComposeResult
@@ -22,6 +23,7 @@ from .cli_runtime import ensure_daemon, spawn_daemon
 from .runtime import build_graph
 from .streams import StreamRegistry
 from .tokens import context_window_for_model, estimate_messages_tokens, get_encoding, output_reserve_tokens
+from .util import retry_until_ok
 
 
 class ChatLog(VerticalScroll):
@@ -87,6 +89,13 @@ class YabotCLIApp(App):
     active_model = reactive("-")
     context_left = reactive("-")
 
+    class DaemonState(str, Enum):
+        UNKNOWN = "unknown"
+        UNAVAILABLE = "unavailable"
+        STARTING = "starting"
+        CONNECTED = "connected"
+        STARTED = "started"
+
     def __init__(
         self,
         graph: Any,
@@ -107,6 +116,9 @@ class YabotCLIApp(App):
         self._daemon_autostarted = False
         self._daemon_atexit_registered = False
         self._daemon_pid_path = daemon_pid_path
+        self._daemon_retry_task: asyncio.Task[None] | None = None
+        self._daemon_state = self.DaemonState.UNKNOWN
+        self._daemon_retry_stop = asyncio.Event()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -132,9 +144,15 @@ class YabotCLIApp(App):
                     self._daemon_autostarted = True
                     await self._wait_for_pidfile()
                     self._register_daemon_cleanup()
+                    self._set_daemon_state(self.DaemonState.STARTED, "Daemon started.")
+                else:
+                    self._set_daemon_state(self.DaemonState.CONNECTED, "Daemon connected.")
             except Exception as exc:
                 self.status_text = "Daemon unavailable"
-                self._append_system(f"Daemon unavailable: {exc}")
+                self._set_daemon_state(self.DaemonState.UNAVAILABLE, f"Daemon unavailable: {exc}")
+                if self.daemon_autostart:
+                    self._set_daemon_state(self.DaemonState.STARTING, "Starting daemon…")
+                self._start_daemon_retry()
 
     async def on_shutdown(self) -> None:
         await self._close_remote()
@@ -242,6 +260,10 @@ class YabotCLIApp(App):
     async def _close_remote(self) -> None:
         if isinstance(self.graph, RemoteGraphClient):
             await self.graph.close()
+        if self._daemon_retry_task is not None:
+            self._daemon_retry_task.cancel()
+            self._daemon_retry_task = None
+        self._daemon_retry_stop.set()
         if self._daemon_autostarted:
             self._stop_daemon_from_pidfile()
             self._daemon_autostarted = False
@@ -276,6 +298,27 @@ class YabotCLIApp(App):
             return
         atexit.register(self._stop_daemon_from_pidfile)
         self._daemon_atexit_registered = True
+
+    def _set_daemon_state(self, state: "YabotCLIApp.DaemonState", message: str | None = None) -> None:
+        if self._daemon_state == state:
+            return
+        self._daemon_state = state
+        if message:
+            self._append_system(message)
+
+    def _start_daemon_retry(self) -> None:
+        if self._daemon_retry_task is not None or not isinstance(self.graph, RemoteGraphClient):
+            return
+        self._daemon_retry_stop.clear()
+        self._daemon_retry_task = asyncio.create_task(self._retry_daemon_connect())
+
+    async def _retry_daemon_connect(self) -> None:
+        async def attempt() -> None:
+            await self.graph.connect()
+            self.status_text = "Ready"
+            self._set_daemon_state(self.DaemonState.CONNECTED, "Daemon connected.")
+
+        await retry_until_ok(attempt, delay_seconds=1.0, cancel_event=self._daemon_retry_stop)
 
     @staticmethod
     def _terminate_pid(pid: int) -> None:
