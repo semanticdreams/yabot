@@ -29,6 +29,7 @@ class GraphState(TypedDict, total=False):
     active: str
     approvals: Dict[str, Any]
     trace: Dict[str, Any]
+    plan: List[str]
 
 
 class YabotGraph:
@@ -111,6 +112,60 @@ class YabotGraph:
                 }
             normalized.append(data)
         return normalized
+
+    @staticmethod
+    def _is_complex_task(text: str) -> bool:
+        tokens = len(text.split())
+        if tokens >= 24:
+            return True
+        if text.count("\n") >= 2:
+            return True
+        if text.count(".") >= 2:
+            return True
+        keywords = (" and ", " then ", " also ", " plus ", " after ", " before ", " while ")
+        lower = f" {text.lower()} "
+        return any(k in lower for k in keywords)
+
+    @staticmethod
+    def _parse_plan(text: str) -> List[str]:
+        lines = [line.strip() for line in text.splitlines()]
+        steps: List[str] = []
+        for line in lines:
+            if not line:
+                continue
+            if line.startswith("- "):
+                steps.append(line[2:].strip())
+                continue
+            if line[0].isdigit():
+                parts = line.split(".", 1)
+                if len(parts) == 2 and parts[1].strip():
+                    steps.append(parts[1].strip())
+                    continue
+            steps.append(line)
+        return steps[:8]
+
+    async def _auto_plan(
+        self,
+        incoming: str,
+        model: str,
+        trace_ctx: dict[str, Any],
+    ) -> List[str]:
+        planner_prompt = (
+            "You are a planner. Return a concise todo list for the task.\n"
+            "Use 3-7 bullets, each starting with '- '. No extra text."
+        )
+        if self.tracer:
+            self.tracer.log("plan_request", {"model": model, "text": incoming}, context=trace_ctx)
+        message = await self.llm.create_message(
+            model,
+            [{"role": "system", "content": planner_prompt}, {"role": "user", "content": incoming}],
+            tools=[],
+        )
+        content = (getattr(message, "content", None) or "").strip()
+        steps = self._parse_plan(content) if content else []
+        if self.tracer:
+            self.tracer.log("plan_created", {"steps": steps, "count": len(steps)}, context=trace_ctx)
+        return steps
 
     def _message_to_dict(self, message: Any) -> dict[str, Any]:
         if isinstance(message, dict):
@@ -553,6 +608,19 @@ class YabotGraph:
         conv_messages.append({"role": "user", "content": incoming})
         conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
 
+        plan_steps: List[str] = []
+        if self._is_complex_task(incoming):
+            plan_steps = await self._auto_plan(incoming, model, trace_ctx)
+            if plan_steps:
+                state["plan"] = plan_steps
+                plan_message = {"role": "system", "content": "Planned steps:\n- " + "\n- ".join(plan_steps)}
+                conv_messages = conv.get("messages", [])
+                conv_messages.append(plan_message)
+                conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+                stream_callback = self._stream_callback.get()
+                if stream_callback:
+                    await stream_callback("[system] Plan:\n- " + "\n- ".join(plan_steps) + "\n")
+
         responses, new_messages, pending_next = await self._run_llm_loop(
             state,
             model,
@@ -560,6 +628,8 @@ class YabotGraph:
             trace_ctx,
             agents_loaded,
         )
+        if plan_steps and not self._stream_callback.get():
+            responses = ["Plan:\n- " + "\n- ".join(plan_steps)] + responses
         if pending_next:
             state["approvals"]["pending"] = pending_next
         elif new_messages is not None:

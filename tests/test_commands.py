@@ -22,6 +22,24 @@ class EchoLLM:
         return self.Message("ok")
 
 
+class PlannerLLM:
+    class Message:
+        def __init__(self, content: str) -> None:
+            self.role = "assistant"
+            self.content = content
+            self.tool_calls = []
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict]] = []
+
+    async def create_message(self, model, messages, tools=None):
+        self.calls.append(messages)
+        system = messages[0].get("content", "") if messages else ""
+        if "planner" in system.lower():
+            return self.Message("- step one\n- step two")
+        return self.Message("done")
+
+
 @pytest.mark.asyncio
 async def test_model_command_updates_state():
     graph = YabotGraph(
@@ -85,3 +103,23 @@ async def test_remaining_context_command_returns_percentage():
     result = await graph.ainvoke("room1", "!remaining-context-percentage")
 
     assert result["responses"][0].startswith("Remaining context:")
+
+
+@pytest.mark.asyncio
+async def test_auto_plans_complex_requests():
+    llm = PlannerLLM()
+    graph = YabotGraph(
+        llm=llm,
+        default_model="gpt-4o-mini",
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        skills=SkillRegistry([]),
+        checkpointer=MemorySaver(),
+    )
+
+    result = await graph.ainvoke("room1", "Please do A, then B, and then C with details.")
+
+    assert result["responses"][0].startswith("Plan:")
+    assert "step one" in result["responses"][0]
+    assert "done" in result["responses"][1]
+    assert len(llm.calls) == 2

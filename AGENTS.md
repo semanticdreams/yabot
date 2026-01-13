@@ -21,3 +21,7 @@ Logging format and location:
 - Override via `YABOT_TRACE_PATH` if needed.
 
 Do not add features that bypass this trace logging.
+
+Trace schema updates:
+- `plan_request`: emitted before automatic planning. Keys: `model`, `text`.
+- `plan_created`: emitted after automatic planning. Keys: `steps`, `count`.
