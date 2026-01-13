@@ -21,21 +21,34 @@ async def test_ensure_daemon_autostarts_once():
     client = FlakyClient(failures=2)
     spawned = 0
 
-    def spawn() -> None:
+    class DummyProc:
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    def spawn() -> DummyProc:
         nonlocal spawned
         spawned += 1
+        return DummyProc()
 
-    await ensure_daemon(client, autostart=True, spawn=spawn, retries=3, delay=0)
+    proc = await ensure_daemon(client, autostart=True, spawn=spawn, retries=3, delay=0)
 
     assert spawned == 1
     assert client.calls == 3
+    assert proc is not None
 
 
 @pytest.mark.asyncio
 async def test_ensure_daemon_no_autostart_raises():
     client = FlakyClient(failures=3)
 
-    def spawn() -> None:
+    class DummyProc:
+        def terminate(self) -> None:
+            raise AssertionError("terminate should not be called")
+
+    def spawn() -> DummyProc:
         raise AssertionError("spawn should not be called")
 
     with pytest.raises(RuntimeError):

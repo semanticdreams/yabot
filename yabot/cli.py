@@ -35,29 +35,31 @@ class ChatLog(VerticalScroll):
 async def ensure_daemon(
     client: RemoteGraphClient,
     autostart: bool,
-    spawn: Callable[[], None],
+    spawn: Callable[[], subprocess.Popen[bytes]],
     retries: int = 5,
     delay: float = 0.2,
-) -> None:
+) -> subprocess.Popen[bytes] | None:
     last_error: Exception | None = None
     spawned = False
+    proc: subprocess.Popen[bytes] | None = None
     for _ in range(retries):
         try:
             await client.connect()
-            return
+            return proc
         except Exception as exc:
             last_error = exc
             if autostart and not spawned:
-                spawn()
+                proc = spawn()
                 spawned = True
             if delay:
                 await asyncio.sleep(delay)
     if last_error:
         raise last_error
+    return proc
 
 
-def _spawn_daemon() -> None:
-    subprocess.Popen([sys.executable, "-m", "yabot.daemon"])
+def _spawn_daemon() -> subprocess.Popen[bytes]:
+    return subprocess.Popen([sys.executable, "-m", "yabot.daemon"])
 
 
 class YabotCLIApp(App):
@@ -127,6 +129,7 @@ class YabotCLIApp(App):
         self.default_model = default_model or (self.available_models[0] if self.available_models else "-")
         self._stop_requested = False
         self.daemon_autostart = daemon_autostart
+        self._daemon_proc: subprocess.Popen[bytes] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -143,14 +146,13 @@ class YabotCLIApp(App):
         self._append_system("Welcome to Yabot CLI. Type !help for commands.")
         if isinstance(self.graph, RemoteGraphClient):
             try:
-                await ensure_daemon(self.graph, self.daemon_autostart, _spawn_daemon)
+                self._daemon_proc = await ensure_daemon(self.graph, self.daemon_autostart, _spawn_daemon)
             except Exception as exc:
                 self.status_text = "Daemon unavailable"
                 self._append_system(f"Daemon unavailable: {exc}")
 
     async def on_shutdown(self) -> None:
-        if isinstance(self.graph, RemoteGraphClient):
-            await self.graph.close()
+        await self._close_remote()
 
     def watch_status_text(self, _old: str, _new: str) -> None:
         self._update_status()
@@ -192,6 +194,10 @@ class YabotCLIApp(App):
 
     async def action_stop(self) -> None:
         await self._handle_stop()
+
+    async def action_quit(self) -> None:
+        await self._close_remote()
+        self.exit()
 
     def _enqueue_command(self, command: str) -> None:
         self._append_message("You", command)
@@ -247,6 +253,13 @@ class YabotCLIApp(App):
         if model:
             self.active_model = model
         self.context_left = self._context_left(result, model, conv_id)
+
+    async def _close_remote(self) -> None:
+        if isinstance(self.graph, RemoteGraphClient):
+            await self.graph.close()
+        if self._daemon_proc is not None:
+            self._daemon_proc.terminate()
+            self._daemon_proc = None
 
     def _context_left(self, result: dict[str, Any], model: str | None, conv_id: str | None) -> str:
         if not model or not conv_id:

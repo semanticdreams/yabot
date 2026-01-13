@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from .config import load_config
 from .interaction import dispatch_graph
@@ -22,30 +23,36 @@ class YabotDaemon:
     async def handler(self, websocket: websockets.WebSocketServerProtocol) -> None:
         tasks: set[asyncio.Task[None]] = set()
 
-        async for raw in websocket:
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                await websocket.send(json.dumps({"type": "error", "error": "Invalid JSON"}))
-                continue
+        try:
+            async for raw in websocket:
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    await websocket.send(json.dumps({"type": "error", "error": "Invalid JSON"}))
+                    continue
 
-            msg_type = payload.get("type")
-            if msg_type == "message":
-                task = asyncio.create_task(self._handle_message(websocket, payload))
-                tasks.add(task)
-                task.add_done_callback(tasks.discard)
-                continue
+                msg_type = payload.get("type")
+                if msg_type == "message":
+                    task = asyncio.create_task(self._handle_message(websocket, payload))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                    continue
 
-            if msg_type == "stop":
-                room_id = str(payload.get("room_id", ""))
-                request_id = payload.get("id")
-                ok = self.streams.stop(room_id)
-                await websocket.send(
-                    json.dumps({"type": "stopped", "id": request_id, "room_id": room_id, "ok": ok})
-                )
-                continue
+                if msg_type == "stop":
+                    room_id = str(payload.get("room_id", ""))
+                    request_id = payload.get("id")
+                    ok = self.streams.stop(room_id)
+                    await websocket.send(
+                        json.dumps({"type": "stopped", "id": request_id, "room_id": room_id, "ok": ok})
+                    )
+                    continue
 
-            await websocket.send(json.dumps({"type": "error", "error": "Unknown message type"}))
+                await websocket.send(json.dumps({"type": "error", "error": "Unknown message type"}))
+        except Exception as exc:
+            if isinstance(exc, ConnectionClosed):
+                self.logger.info("Connection closed")
+            else:
+                self.logger.exception("Connection handler error: %s", exc)
 
         for task in tasks:
             task.cancel()
