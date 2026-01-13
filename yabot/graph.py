@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import uuid
 import os
@@ -52,6 +53,7 @@ class YabotGraph:
         self.checkpointer = checkpointer or MemorySaver()
         self.tracer = tracer
         self.system_prompt = system_prompt
+        self._stream_callback: contextvars.ContextVar = contextvars.ContextVar("yabot_stream_callback", default=None)
         self.graph = self._build_graph()
 
     async def ainvoke(self, room_id: str, text: str) -> Dict[str, Any]:
@@ -62,6 +64,18 @@ class YabotGraph:
             {"incoming": text, "trace": trace_ctx},
             config={"configurable": {"thread_id": room_id}},
         )
+
+    async def ainvoke_stream(
+        self,
+        room_id: str,
+        text: str,
+        on_token: Any,
+    ) -> Dict[str, Any]:
+        token = self._stream_callback.set(on_token)
+        try:
+            return await self.ainvoke(room_id, text)
+        finally:
+            self._stream_callback.reset(token)
 
     def _build_graph(self):
         builder: StateGraph = StateGraph(GraphState)
@@ -99,6 +113,15 @@ class YabotGraph:
         return normalized
 
     def _message_to_dict(self, message: Any) -> dict[str, Any]:
+        if isinstance(message, dict):
+            msg: dict[str, Any] = {
+                "role": message.get("role", "assistant"),
+                "content": message.get("content"),
+            }
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                msg["tool_calls"] = self._tool_calls_to_dicts(tool_calls)
+            return msg
         msg: dict[str, Any] = {"role": message.role, "content": message.content}
         tool_calls = getattr(message, "tool_calls", None)
         if tool_calls:
@@ -326,9 +349,18 @@ class YabotGraph:
                         },
                         context=trace_ctx,
                     )
-                message = await self.llm.create_message(
-                    model, working_messages, tools=self.base_tools + self.skill_tools
-                )
+                stream_callback = self._stream_callback.get()
+                if stream_callback:
+                    message = await self.llm.create_message_stream(
+                        model,
+                        working_messages,
+                        tools=self.base_tools + self.skill_tools,
+                        on_token=stream_callback,
+                    )
+                else:
+                    message = await self.llm.create_message(
+                        model, working_messages, tools=self.base_tools + self.skill_tools
+                    )
                 assistant_message = self._message_to_dict(message)
                 if self.tracer:
                     self.tracer.log("llm_response", {"message": assistant_message}, context=trace_ctx)

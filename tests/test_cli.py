@@ -48,6 +48,13 @@ class SlowGraph:
         return {"responses": ["done"], "active": "conv-1", "conversations": {"conv-1": {"model": "gpt-4o-mini"}}}
 
 
+class StreamGraph:
+    async def ainvoke_stream(self, room_id: str, text: str, on_token):
+        await on_token("stream")
+        await on_token("ed")
+        return {"responses": ["streamed"]}
+
+
 class DummyLLM:
     async def create_message(self, model, messages, tools=None):
         raise AssertionError("LLM should not be called for commands.")
@@ -101,3 +108,14 @@ async def test_cli_context_command_prints_percentage():
 
     assert "[system] Processing request" in output.getvalue()
     assert "Remaining context:" in output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_cli_streams_llm_output():
+    output = io.StringIO()
+    cli = YabotCLI(graph=StreamGraph(), input_fn=DummyInput(["go"]), output=output)
+
+    await cli.run_async()
+
+    out_text = output.getvalue()
+    assert out_text.count("streamed") == 1

@@ -31,6 +31,13 @@ class SlowGraph:
         return {"responses": ["done"]}
 
 
+class StreamGraph:
+    async def ainvoke_stream(self, room_id: str, text: str, on_token):
+        await on_token("hel")
+        await on_token("lo")
+        return {"responses": ["hello"]}
+
+
 async def _start_server(graph):
     daemon = YabotDaemon(graph)
     server = await websockets.serve(daemon.handler, "127.0.0.1", 0)
@@ -67,3 +74,21 @@ async def test_daemon_stop_cancels_task():
             assert stopped["type"] == "stopped"
             assert stopped["id"] == "stop-1"
             assert stopped["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_daemon_streams_tokens():
+    graph = StreamGraph()
+    server, url = await _start_server(graph)
+    async with server:
+        client = RemoteGraphClient(url)
+        chunks: list[str] = []
+
+        async def on_token(chunk: str) -> None:
+            chunks.append(chunk)
+
+        result = await client.ainvoke_stream("room", "hi", on_token=on_token)
+        await client.close()
+
+    assert "".join(chunks) == "hello"
+    assert result["responses"] == ["hello"]

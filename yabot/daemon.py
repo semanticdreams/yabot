@@ -10,7 +10,6 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from .config import load_config
-from .interaction import dispatch_graph
 from .runtime import build_graph
 from .streams import StreamRegistry
 from .trace import TraceLogger
@@ -69,7 +68,23 @@ class YabotDaemon:
         room_id = str(payload.get("room_id", ""))
         text = str(payload.get("text", ""))
         try:
-            result = await dispatch_graph(self.graph, self.streams, room_id, text)
+            async def on_token(chunk: str) -> None:
+                await websocket.send(
+                    ServerMessage(type="stream", id=request_id, room_id=room_id, chunk=chunk).to_json()
+                )
+
+            async def run_graph() -> dict[str, Any]:
+                stream_fn = getattr(self.graph, "ainvoke_stream", None)
+                if callable(stream_fn):
+                    return await stream_fn(room_id, text, on_token=on_token)
+                return await self.graph.ainvoke(room_id, text)
+
+            task = asyncio.create_task(run_graph())
+            self.streams.register(room_id, task)
+            try:
+                result = await task
+            finally:
+                self.streams.clear(room_id, task)
         except asyncio.CancelledError:
             await websocket.send(ServerMessage(type="cancelled", id=request_id, room_id=room_id).to_json())
         except Exception as exc:

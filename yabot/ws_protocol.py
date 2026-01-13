@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 
 MessageType = Literal["message", "stop"]
-ResponseType = Literal["response", "stopped", "cancelled", "error"]
+ResponseType = Literal["response", "stopped", "cancelled", "error", "stream"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,7 @@ class ServerMessage:
     result: dict[str, Any] | None = None
     ok: bool | None = None
     error: str | None = None
+    chunk: str | None = None
 
     def to_json(self) -> str:
         payload: dict[str, Any] = {"type": self.type, "id": self.id, "room_id": self.room_id}
@@ -40,6 +41,8 @@ class ServerMessage:
             payload["ok"] = self.ok
         if self.error is not None:
             payload["error"] = self.error
+        if self.chunk is not None:
+            payload["chunk"] = self.chunk
         return json.dumps(payload)
 
 
