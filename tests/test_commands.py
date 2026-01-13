@@ -69,3 +69,19 @@ async def test_new_list_use_reset_flow():
 
     result = await graph.ainvoke("room1", "!reset")
     assert result["conversations"][newer_id]["messages"] == []
+
+
+@pytest.mark.asyncio
+async def test_remaining_context_command_returns_percentage():
+    graph = YabotGraph(
+        llm=DummyLLM(),
+        default_model="gpt-4o-mini",
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        skills=SkillRegistry([]),
+        checkpointer=MemorySaver(),
+    )
+
+    result = await graph.ainvoke("room1", "!remaining-context-percentage")
+
+    assert result["responses"][0].startswith("Remaining context:")

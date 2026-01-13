@@ -39,7 +39,7 @@ Start the daemon once, then point both clients at it:
 
 ## CLI usage
 
-The CLI uses Textual and supports the same commands as the Matrix bot. Use `!help` to see them.
+The CLI is text-only (print/input) and supports the same commands as the Matrix bot. Use `!help` to see them.
 
 Key bindings:
 

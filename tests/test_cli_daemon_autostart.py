@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from yabot.cli import YabotCLIApp
+from yabot.cli import YabotCLI
 from yabot.cli_runtime import ensure_daemon
 from yabot.remote import RemoteGraphClient
 
@@ -63,7 +63,7 @@ async def test_ensure_daemon_no_autostart_raises():
 @pytest.mark.asyncio
 async def test_cli_closes_autostarted_daemon_process(tmp_path: Path):
     pid_path = tmp_path / "daemon.pid"
-    app = YabotCLIApp(
+    app = YabotCLI(
         graph=RemoteGraphClient("ws://127.0.0.1:1"),
         daemon_pid_path=pid_path,
     )

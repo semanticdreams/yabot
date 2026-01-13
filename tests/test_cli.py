@@ -1,8 +1,23 @@
 import asyncio
+import io
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 
-from yabot.cli import ChatLog, YabotCLIApp
+from yabot.cli import YabotCLI
+from yabot.graph import YabotGraph
+from yabot.skills import SkillRegistry
+
+
+class DummyInput:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = iter(lines)
+
+    def __call__(self, _prompt: str = "") -> str:
+        try:
+            return next(self._lines)
+        except StopIteration as exc:
+            raise EOFError from exc
 
 
 class DummyGraph:
@@ -33,42 +48,52 @@ class SlowGraph:
         return {"responses": ["done"], "active": "conv-1", "conversations": {"conv-1": {"model": "gpt-4o-mini"}}}
 
 
+class DummyLLM:
+    async def create_message(self, model, messages, tools=None):
+        raise AssertionError("LLM should not be called for commands.")
+
+
 @pytest.mark.asyncio
-async def test_cli_app_renders_response():
+async def test_cli_prints_response():
     graph = DummyGraph()
-    app = YabotCLIApp(graph=graph, available_models=["gpt-4o-mini"], default_model="gpt-4o-mini")
+    output = io.StringIO()
+    cli = YabotCLI(graph=graph, input_fn=DummyInput(["hello"]), output=output)
 
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.click("#chat-input")
-        await pilot.press("h", "e", "l", "l", "o")
-        await pilot.press("enter")
-        await pilot.pause()
+    await cli.run_async()
 
-        chat = app.query_one(ChatLog)
-        assert ("You", "hello") in chat.messages
-        assert ("Yabot", "echo: hello") in chat.messages
-        assert graph.calls == [("cli", "hello")]
+    assert "echo: hello" in output.getvalue()
+    assert graph.calls == [("cli", "hello")]
 
 
 @pytest.mark.asyncio
 async def test_cli_stop_cancels_active_task():
     graph = SlowGraph()
-    app = YabotCLIApp(graph=graph)
+    output = io.StringIO()
+    cli = YabotCLI(graph=graph, input_fn=DummyInput(["work", "!stop"]), output=output)
 
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.click("#chat-input")
-        await pilot.press("w", "o", "r", "k")
-        await pilot.press("enter")
-        await asyncio.wait_for(graph.started.wait(), 1)
+    runner = asyncio.create_task(cli.run_async())
+    await asyncio.wait_for(graph.started.wait(), 1)
+    await asyncio.wait_for(graph.cancelled.wait(), 1)
+    await runner
 
-        await pilot.click("#chat-input")
-        await pilot.press("!", "s", "t", "o", "p")
-        await pilot.press("enter")
-        await asyncio.wait_for(graph.cancelled.wait(), 1)
-        await pilot.pause()
+    out_text = output.getvalue()
+    assert "Stopping current response" in out_text
+    assert "done" not in out_text
 
-        chat = app.query_one(ChatLog)
-        assert ("System", "Stopping current response…") in chat.messages
-        assert ("Yabot", "done") not in chat.messages
+
+@pytest.mark.asyncio
+async def test_cli_context_command_prints_percentage():
+    graph = YabotGraph(
+        llm=DummyLLM(),
+        default_model="gpt-4o-mini",
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        skills=SkillRegistry([]),
+        checkpointer=MemorySaver(),
+    )
+    output = io.StringIO()
+    cli = YabotCLI(graph=graph, input_fn=DummyInput(["!remaining-context-percentage"]), output=output)
+
+    await cli.run_async()
+
+    assert "Remaining context:" in output.getvalue()

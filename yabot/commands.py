@@ -11,7 +11,7 @@ from .tokens import (
 )
 
 
-CMD_RE = re.compile(r"^!(\w+)(?:\s+(.*))?$")
+CMD_RE = re.compile(r"^!([\w-]+)(?:\s+(.*))?$")
 
 
 def help_text() -> str:
@@ -23,6 +23,7 @@ def help_text() -> str:
         "!list\n"
         "!use <id>\n"
         "!reset\n"
+        "!remaining-context-percentage\n"
         "!stop\n"
     )
 
@@ -133,7 +134,26 @@ def handle_command(
     if cmd == "reset":
         room_reset(state)
         return "Cleared memory for this room’s active conversation."
+    if cmd in {"remaining-context-percentage", "remaining-context", "context"}:
+        return remaining_context_percentage(state, default_model)
     return "Unknown command.\n" + help_text()
+
+
+def remaining_context_percentage(state: State, default_model: str) -> str:
+    conv_id = state.get("active")
+    conv = state.get("conversations", {}).get(conv_id, {}) if conv_id else {}
+    model = conv.get("model", default_model)
+    messages = conv.get("messages", [])
+    if not isinstance(messages, list):
+        return "Remaining context: 0%"
+    context_window = context_window_for_model(model)
+    reserve = output_reserve_tokens(context_window)
+    input_budget = max(1, context_window - reserve)
+    encoding = get_encoding(model)
+    used = estimate_messages_tokens(messages, encoding)
+    remaining = max(0, input_budget - used)
+    percent = int((remaining / input_budget) * 100)
+    return f"Remaining context: {percent}%"
 
 
 def trim_messages(messages: List[Dict[str, Any]], model: str, max_turns: int) -> List[Dict[str, Any]]:
