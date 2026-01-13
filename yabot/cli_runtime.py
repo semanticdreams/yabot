@@ -42,4 +42,11 @@ def spawn_daemon(pid_path: Path | None = None, parent_pid: int | None = None) ->
         env["YABOT_DAEMON_PID_PATH"] = str(pid_path)
     if parent_pid is not None:
         env["YABOT_DAEMON_PARENT_PID"] = str(parent_pid)
-    return subprocess.Popen([sys.executable, "-m", "yabot.daemon"], env=env)
+    return subprocess.Popen(
+        [sys.executable, "-m", "yabot.daemon"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
