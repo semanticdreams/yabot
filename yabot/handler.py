@@ -59,11 +59,7 @@ class BotHandler:
             await self.messenger.send_text(room_id, "Error while processing request.")
             return
 
-        responses = result.get("responses", []) or []
-        tool_notices = result.get("tool_notices", []) or []
-        for body in tool_notices:
-            await self.messenger.send_text(room_id, body)
-        for body in responses:
+        for body in result.get("responses", []) or []:
             await self.messenger.send_text(room_id, body)
 
     async def on_decryption_failed(self, room: MatrixRoom, event: MegolmEvent) -> None:
