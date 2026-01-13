@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from yabot.cli import ensure_daemon
+from yabot.cli_runtime import ensure_daemon
 
 
 class FlakyClient:

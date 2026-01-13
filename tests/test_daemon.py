@@ -1,11 +1,10 @@
 import asyncio
-import json
-
 import pytest
 import websockets
 
 from yabot.daemon import YabotDaemon
 from yabot.remote import RemoteGraphClient
+from yabot.ws_protocol import ClientMessage, parse_json
 
 
 class StatefulGraph:
@@ -61,10 +60,10 @@ async def test_daemon_stop_cancels_task():
     server, url = await _start_server(graph)
     async with server:
         async with websockets.connect(url) as ws:
-            await ws.send(json.dumps({"type": "message", "id": "1", "room_id": "room", "text": "work"}))
+            await ws.send(ClientMessage(type="message", id="1", room_id="room", text="work").to_json())
             await asyncio.wait_for(graph.started.wait(), 1)
-            await ws.send(json.dumps({"type": "stop", "id": "stop-1", "room_id": "room"}))
-            stopped = json.loads(await ws.recv())
+            await ws.send(ClientMessage(type="stop", id="stop-1", room_id="room").to_json())
+            stopped = parse_json(await ws.recv())
             assert stopped["type"] == "stopped"
             assert stopped["id"] == "stop-1"
             assert stopped["ok"] is True

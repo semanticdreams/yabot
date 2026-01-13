@@ -24,6 +24,8 @@ class Config:
     nio_store_dir: str
     daemon_url: str | None
     cli_daemon_autostart: bool
+    daemon_host: str
+    daemon_port: int
 
 
 def load_config() -> Config:
@@ -38,6 +40,8 @@ def load_config() -> Config:
     allowed_users = [u.strip() for u in allowed_users_raw.split(",") if u.strip()]
     cross_signing_reset = os.environ.get("CROSS_SIGNING_RESET", "").strip().lower() in {"1", "true", "yes"}
     daemon_url = os.environ.get("YABOT_DAEMON_URL")
+    daemon_host = os.environ.get("YABOT_DAEMON_HOST", "127.0.0.1")
+    daemon_port = int(os.environ.get("YABOT_DAEMON_PORT", "8765"))
     cli_daemon_autostart = (
         os.environ.get("YABOT_CLI_DAEMON_AUTOSTART", "").strip().lower() in {"1", "true", "yes"}
     )
@@ -78,4 +82,6 @@ def load_config() -> Config:
         nio_store_dir=nio_store_dir,
         daemon_url=daemon_url,
         cli_daemon_autostart=cli_daemon_autostart,
+        daemon_host=daemon_host,
+        daemon_port=daemon_port,
     )

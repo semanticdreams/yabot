@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from typing import Any
 
 import websockets
 
+from .ws_protocol import ClientMessage, parse_json
 
 class RemoteGraphClient:
     def __init__(self, url: str) -> None:
@@ -53,9 +53,9 @@ class RemoteGraphClient:
         request_id = str(uuid.uuid4())
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
-        payload = {"type": "message", "id": request_id, "room_id": room_id, "text": text}
+        payload = ClientMessage(type="message", id=request_id, room_id=room_id, text=text).to_json()
         async with self._send_lock:
-            await self._ws.send(json.dumps(payload))
+            await self._ws.send(payload)
         return await future
 
     async def stop(self, room_id: str) -> bool:
@@ -64,9 +64,9 @@ class RemoteGraphClient:
         request_id = str(uuid.uuid4())
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
-        payload = {"type": "stop", "id": request_id, "room_id": room_id}
+        payload = ClientMessage(type="stop", id=request_id, room_id=room_id).to_json()
         async with self._send_lock:
-            await self._ws.send(json.dumps(payload))
+            await self._ws.send(payload)
         result = await future
         return bool(result.get("ok"))
 
@@ -74,7 +74,7 @@ class RemoteGraphClient:
         assert self._ws is not None
         try:
             async for raw in self._ws:
-                message = json.loads(raw)
+                message = parse_json(raw)
                 request_id = message.get("id")
                 if not request_id or request_id not in self._pending:
                     continue

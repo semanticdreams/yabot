@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -12,6 +11,7 @@ from .config import load_config
 from .interaction import dispatch_graph
 from .runtime import build_graph
 from .streams import StreamRegistry
+from .ws_protocol import ClientMessage, ServerMessage, parse_json
 
 
 class YabotDaemon:
@@ -26,9 +26,11 @@ class YabotDaemon:
         try:
             async for raw in websocket:
                 try:
-                    payload = json.loads(raw)
-                except json.JSONDecodeError:
-                    await websocket.send(json.dumps({"type": "error", "error": "Invalid JSON"}))
+                    payload = parse_json(raw)
+                except Exception:
+                    await websocket.send(
+                        ServerMessage(type="error", id="", room_id="", error="Invalid JSON").to_json()
+                    )
                     continue
 
                 msg_type = payload.get("type")
@@ -43,11 +45,13 @@ class YabotDaemon:
                     request_id = payload.get("id")
                     ok = self.streams.stop(room_id)
                     await websocket.send(
-                        json.dumps({"type": "stopped", "id": request_id, "room_id": room_id, "ok": ok})
+                        ServerMessage(type="stopped", id=str(request_id), room_id=room_id, ok=ok).to_json()
                     )
                     continue
 
-                await websocket.send(json.dumps({"type": "error", "error": "Unknown message type"}))
+                await websocket.send(
+                    ServerMessage(type="error", id="", room_id="", error="Unknown message type").to_json()
+                )
         except Exception as exc:
             if isinstance(exc, ConnectionClosed):
                 self.logger.info("Connection closed")
@@ -64,14 +68,14 @@ class YabotDaemon:
         try:
             result = await dispatch_graph(self.graph, self.streams, room_id, text)
         except asyncio.CancelledError:
-            await websocket.send(json.dumps({"type": "cancelled", "id": request_id, "room_id": room_id}))
+            await websocket.send(ServerMessage(type="cancelled", id=request_id, room_id=room_id).to_json())
         except Exception as exc:
             await websocket.send(
-                json.dumps({"type": "error", "id": request_id, "room_id": room_id, "error": str(exc)})
+                ServerMessage(type="error", id=request_id, room_id=room_id, error=str(exc)).to_json()
             )
         else:
             await websocket.send(
-                json.dumps({"type": "response", "id": request_id, "room_id": room_id, "result": result})
+                ServerMessage(type="response", id=request_id, room_id=room_id, result=result).to_json()
             )
 
 
@@ -88,8 +92,8 @@ def run() -> None:
     )
     config = load_config()
     graph = build_graph(config)
-    host = "127.0.0.1"
-    port = 8765
+    host = config.daemon_host
+    port = config.daemon_port
     logging.info("Starting Yabot daemon on ws://%s:%d", host, port)
     asyncio.run(serve(host, port, graph))
 

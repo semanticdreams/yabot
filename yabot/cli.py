@@ -3,8 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
-import sys
-from typing import Any, Callable
+from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, VerticalScroll
@@ -15,6 +14,7 @@ from .commands import active_conversation_meta
 from .config import load_config
 from .interaction import dispatch_graph, is_stop_command, request_stop
 from .remote import RemoteGraphClient
+from .cli_runtime import ensure_daemon, spawn_daemon
 from .runtime import build_graph
 from .streams import StreamRegistry
 from .tokens import context_window_for_model, estimate_messages_tokens, get_encoding, output_reserve_tokens
@@ -30,36 +30,6 @@ class ChatLog(VerticalScroll):
         self.messages.append((role, text))
         self.mount(Static(f"{role}: {text}", classes=f"message {role_class}"))
         self.scroll_end(animate=False)
-
-
-async def ensure_daemon(
-    client: RemoteGraphClient,
-    autostart: bool,
-    spawn: Callable[[], subprocess.Popen[bytes]],
-    retries: int = 5,
-    delay: float = 0.2,
-) -> subprocess.Popen[bytes] | None:
-    last_error: Exception | None = None
-    spawned = False
-    proc: subprocess.Popen[bytes] | None = None
-    for _ in range(retries):
-        try:
-            await client.connect()
-            return proc
-        except Exception as exc:
-            last_error = exc
-            if autostart and not spawned:
-                proc = spawn()
-                spawned = True
-            if delay:
-                await asyncio.sleep(delay)
-    if last_error:
-        raise last_error
-    return proc
-
-
-def _spawn_daemon() -> subprocess.Popen[bytes]:
-    return subprocess.Popen([sys.executable, "-m", "yabot.daemon"])
 
 
 class YabotCLIApp(App):
@@ -146,7 +116,7 @@ class YabotCLIApp(App):
         self._append_system("Welcome to Yabot CLI. Type !help for commands.")
         if isinstance(self.graph, RemoteGraphClient):
             try:
-                self._daemon_proc = await ensure_daemon(self.graph, self.daemon_autostart, _spawn_daemon)
+                self._daemon_proc = await ensure_daemon(self.graph, self.daemon_autostart, spawn_daemon)
             except Exception as exc:
                 self.status_text = "Daemon unavailable"
                 self._append_system(f"Daemon unavailable: {exc}")
