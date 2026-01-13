@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from pathlib import Path
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -11,6 +12,7 @@ from .config import load_config
 from .interaction import dispatch_graph
 from .runtime import build_graph
 from .streams import StreamRegistry
+from .trace import TraceLogger
 from .ws_protocol import ClientMessage, ServerMessage, parse_json
 
 
@@ -91,6 +93,13 @@ def run() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     config = load_config()
+    logging.info("Trace log path: %s", config.trace_path)
+    TraceLogger(Path(config.trace_path)).log(
+        "daemon_startup",
+        {
+            "trace_path": str(config.trace_path),
+        },
+    )
     graph = build_graph(config)
     host = config.daemon_host
     port = config.daemon_port

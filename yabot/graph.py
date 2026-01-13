@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -25,6 +26,7 @@ class GraphState(TypedDict, total=False):
     conversations: Dict[str, Dict[str, Any]]
     active: str
     approvals: Dict[str, Any]
+    trace: Dict[str, Any]
 
 
 class YabotGraph:
@@ -36,6 +38,7 @@ class YabotGraph:
         max_turns: int,
         skills: SkillRegistry,
         checkpointer: Any | None = None,
+        tracer: Any | None = None,
     ) -> None:
         self.llm = llm
         self.default_model = default_model
@@ -45,11 +48,15 @@ class YabotGraph:
         self.base_tools = list(TOOLS)
         self.skill_tools = skills.tool_defs()
         self.checkpointer = checkpointer or MemorySaver()
+        self.tracer = tracer
         self.graph = self._build_graph()
 
     async def ainvoke(self, room_id: str, text: str) -> Dict[str, Any]:
+        trace_ctx = {"trace_id": uuid.uuid4().hex, "room_id": room_id}
+        if self.tracer:
+            self.tracer.log("invoke", {"text": text}, context=trace_ctx)
         return await self.graph.ainvoke(
-            {"incoming": text},
+            {"incoming": text, "trace": trace_ctx},
             config={"configurable": {"thread_id": room_id}},
         )
 
@@ -163,7 +170,7 @@ class YabotGraph:
         return None
 
     async def _execute_tool_calls(
-        self, tool_calls: List[dict[str, Any]]
+        self, tool_calls: List[dict[str, Any]], trace_ctx: dict[str, Any]
     ) -> tuple[List[dict[str, Any]], List[dict[str, Any]]]:
         tool_messages: List[dict[str, Any]] = []
         system_messages: List[dict[str, Any]] = []
@@ -174,6 +181,7 @@ class YabotGraph:
             try:
                 arguments = json.loads(raw_args)
             except json.JSONDecodeError as exc:
+                arguments = {}
                 result = f"ERROR: invalid JSON arguments: {exc}"
             else:
                 if self.skills.is_skill_tool(name):
@@ -185,6 +193,18 @@ class YabotGraph:
                         result = f"ERROR: unknown skill tool {name}"
                 else:
                     result = await execute_tool_async(name, arguments)
+                if self.tracer:
+                    self.tracer.log(
+                        "tool_result",
+                        {
+                            "tool": name,
+                            "tool_call_id": call.get("id", ""),
+                            "raw_arguments": raw_args,
+                            "arguments": arguments,
+                            "result": result,
+                        },
+                        context=trace_ctx,
+                    )
             tool_messages.append(
                 {
                     "role": "tool",
@@ -201,6 +221,7 @@ class YabotGraph:
         state: Dict[str, Any],
         model: str,
         messages: List[dict[str, Any]],
+        trace_ctx: dict[str, Any],
         initial_tool_calls: List[dict[str, Any]] | None = None,
         initial_assistant: dict[str, Any] | None = None,
     ) -> tuple[List[str], List[dict[str, Any]] | None, dict[str, Any] | None]:
@@ -217,13 +238,27 @@ class YabotGraph:
 
         while True:
             if tool_calls is None:
+                if self.tracer:
+                    self.tracer.log(
+                        "llm_request",
+                        {
+                            "model": model,
+                            "messages": working_messages,
+                            "tools": [t.get("function", {}).get("name") for t in self.base_tools + self.skill_tools],
+                        },
+                        context=trace_ctx,
+                    )
                 message = await self.llm.create_message(
                     model, working_messages, tools=self.base_tools + self.skill_tools
                 )
                 assistant_message = self._message_to_dict(message)
+                if self.tracer:
+                    self.tracer.log("llm_response", {"message": assistant_message}, context=trace_ctx)
                 new_messages.append(assistant_message)
                 working_messages.append(assistant_message)
                 tool_calls = self._tool_calls_to_dicts(getattr(message, "tool_calls", None))
+                if self.tracer and tool_calls:
+                    self.tracer.log("tool_calls", {"calls": tool_calls}, context=trace_ctx)
 
             if tool_calls:
                 for call in tool_calls:
@@ -243,13 +278,15 @@ class YabotGraph:
 
                 missing = self._first_missing_approval(state, tool_calls)
                 if missing:
+                    if self.tracer:
+                        self.tracer.log("approval_request", {"request": missing}, context=trace_ctx)
                     return [self._approval_prompt(missing)], None, {
                         "request": missing,
                         "assistant": assistant_message,
                         "tool_calls": tool_calls,
                     }
 
-                tool_messages, system_messages = await self._execute_tool_calls(tool_calls)
+                tool_messages, system_messages = await self._execute_tool_calls(tool_calls, trace_ctx)
                 new_messages.extend(tool_messages)
                 working_messages.extend(tool_messages)
                 if system_messages:
@@ -263,12 +300,22 @@ class YabotGraph:
                 responses = [p.strip() for p in final_text.split("\n\n") if p.strip()]
             else:
                 responses = ["…(no output)"]
+            if self.tracer:
+                self.tracer.log("response_final", {"responses": responses}, context=trace_ctx)
             return responses, new_messages, None
 
     async def _process_input(self, state: Dict[str, Any]) -> Dict[str, Any]:
         incoming = (state.get("incoming") or "").strip()
         responses: List[str] = []
         ensure_state(state, self.default_model)
+        trace_ctx = dict(state.get("trace") or {})
+
+        conv_id, conv = room_active_conv(state)
+        model = conv.get("model", self.default_model)
+        trace_ctx.update({"conv_id": conv_id, "model": model})
+
+        if self.tracer:
+            self.tracer.log("incoming", {"text": incoming}, context=trace_ctx)
 
         pending = state["approvals"].get("pending")
         if pending:
@@ -292,6 +339,7 @@ class YabotGraph:
                     state,
                     model,
                     base_messages,
+                    trace_ctx,
                 )
                 if pending_next:
                     state["approvals"]["pending"] = pending_next
@@ -308,6 +356,8 @@ class YabotGraph:
                 elif request.get("kind") == "dir":
                     self._approve_dir(state, request.get("dir", ""))
 
+                if self.tracer:
+                    self.tracer.log("approval_response", {"request": request, "approved": True}, context=trace_ctx)
                 state["approvals"]["pending"] = None
                 _, conv = room_active_conv(state)
                 model = conv.get("model", self.default_model)
@@ -315,6 +365,7 @@ class YabotGraph:
                     state,
                     model,
                     conv.get("messages", []),
+                    trace_ctx,
                     initial_tool_calls=pending.get("tool_calls"),
                     initial_assistant=pending.get("assistant"),
                 )
@@ -325,6 +376,8 @@ class YabotGraph:
                     conv_messages.extend(new_messages)
                     conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
             else:
+                if self.tracer:
+                    self.tracer.log("approval_response", {"request": request, "approved": False}, context=trace_ctx)
                 state["approvals"]["pending"] = None
                 responses = ["Cancelled."]
 
@@ -334,6 +387,8 @@ class YabotGraph:
         parsed = parse_command(incoming)
         if parsed:
             cmd, arg = parsed
+            if self.tracer:
+                self.tracer.log("command", {"command": cmd, "arg": arg}, context=trace_ctx)
             responses = [handle_command(state, cmd, arg, self.available_models, self.default_model)]
             state["responses"] = responses
             return state
@@ -348,6 +403,7 @@ class YabotGraph:
             state,
             model,
             conv.get("messages", []),
+            trace_ctx,
         )
         if pending_next:
             state["approvals"]["pending"] = pending_next
@@ -357,4 +413,6 @@ class YabotGraph:
             conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
 
         state["responses"] = responses
+        if self.tracer:
+            self.tracer.log("invoke_result", {"responses": responses}, context=trace_ctx)
         return state

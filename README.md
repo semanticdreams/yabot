@@ -21,6 +21,13 @@
 - `YABOT_CLI_DAEMON_AUTOSTART`: when set to `1`/`true`/`yes`, the CLI will start the daemon if it is not reachable.
 - `YABOT_DAEMON_HOST`: host interface for the daemon (default `127.0.0.1`).
 - `YABOT_DAEMON_PORT`: port for the daemon (default `8765`).
+- `YABOT_TRACE_PATH`: optional path for JSONL trace logs; defaults to the per-user log directory.
+
+## Logging & tracing
+
+The agent writes JSONL traces (prompts, tool calls, approvals, responses, metadata) to the per-user log dir.
+By default this is under your platform log directory for the app name, with `trace.jsonl` as the filename.
+Each trace line includes `schema_version`, `event`, `trace_id`, `room_id`, `conv_id`, and `model` when available.
 
 ## Daemon mode (shared state)
 

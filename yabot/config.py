@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from typing import List
 
-from appdirs import user_data_dir
+from appdirs import user_data_dir, user_log_dir
 from dotenv import load_dotenv
 
 
@@ -26,6 +26,8 @@ class Config:
     cli_daemon_autostart: bool
     daemon_host: str
     daemon_port: int
+    log_dir: str
+    trace_path: str
 
 
 def load_config() -> Config:
@@ -42,6 +44,9 @@ def load_config() -> Config:
     daemon_url = os.environ.get("YABOT_DAEMON_URL")
     daemon_host = os.environ.get("YABOT_DAEMON_HOST", "127.0.0.1")
     daemon_port = int(os.environ.get("YABOT_DAEMON_PORT", "8765"))
+    log_dir = user_log_dir(bot_name)
+    trace_path = os.environ.get("YABOT_TRACE_PATH", os.path.join(log_dir, "trace.jsonl"))
+    os.makedirs(log_dir, exist_ok=True)
     cli_daemon_autostart = (
         os.environ.get("YABOT_CLI_DAEMON_AUTOSTART", "").strip().lower() in {"1", "true", "yes"}
     )
@@ -84,4 +89,6 @@ def load_config() -> Config:
         cli_daemon_autostart=cli_daemon_autostart,
         daemon_host=daemon_host,
         daemon_port=daemon_port,
+        log_dir=log_dir,
+        trace_path=trace_path,
     )
