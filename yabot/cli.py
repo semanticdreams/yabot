@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
+from pathlib import Path
 import subprocess
+import os
+import time
 from typing import Any
 
 from textual.app import App, ComposeResult
@@ -90,6 +94,7 @@ class YabotCLIApp(App):
         available_models: list[str] | None = None,
         default_model: str | None = None,
         daemon_autostart: bool = False,
+        daemon_pid_path: Path | None = None,
     ) -> None:
         super().__init__()
         self.graph = graph
@@ -99,7 +104,9 @@ class YabotCLIApp(App):
         self.default_model = default_model or (self.available_models[0] if self.available_models else "-")
         self._stop_requested = False
         self.daemon_autostart = daemon_autostart
-        self._daemon_proc: subprocess.Popen[bytes] | None = None
+        self._daemon_autostarted = False
+        self._daemon_atexit_registered = False
+        self._daemon_pid_path = daemon_pid_path
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -116,7 +123,15 @@ class YabotCLIApp(App):
         self._append_system("Welcome to Yabot CLI. Type !help for commands.")
         if isinstance(self.graph, RemoteGraphClient):
             try:
-                self._daemon_proc = await ensure_daemon(self.graph, self.daemon_autostart, spawn_daemon)
+                proc = await ensure_daemon(
+                    self.graph,
+                    self.daemon_autostart,
+                    lambda: spawn_daemon(self._daemon_pid_path, os.getpid()),
+                )
+                if proc is not None:
+                    self._daemon_autostarted = True
+                    await self._wait_for_pidfile()
+                    self._register_daemon_cleanup()
             except Exception as exc:
                 self.status_text = "Daemon unavailable"
                 self._append_system(f"Daemon unavailable: {exc}")
@@ -227,9 +242,9 @@ class YabotCLIApp(App):
     async def _close_remote(self) -> None:
         if isinstance(self.graph, RemoteGraphClient):
             await self.graph.close()
-        if self._daemon_proc is not None:
-            self._daemon_proc.terminate()
-            self._daemon_proc = None
+        if self._daemon_autostarted:
+            self._stop_daemon_from_pidfile()
+            self._daemon_autostarted = False
 
     def _context_left(self, result: dict[str, Any], model: str | None, conv_id: str | None) -> str:
         if not model or not conv_id:
@@ -248,6 +263,53 @@ class YabotCLIApp(App):
         percent = int((remaining / input_budget) * 100)
         return f"{percent}% left"
 
+    async def _wait_for_pidfile(self, retries: int = 10, delay: float = 0.1) -> None:
+        if self._daemon_pid_path is None:
+            return
+        for _ in range(retries):
+            if self._daemon_pid_path.exists():
+                return
+            await asyncio.sleep(delay)
+
+    def _register_daemon_cleanup(self) -> None:
+        if self._daemon_atexit_registered:
+            return
+        atexit.register(self._stop_daemon_from_pidfile)
+        self._daemon_atexit_registered = True
+
+    @staticmethod
+    def _terminate_pid(pid: int) -> None:
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            return
+        for _ in range(10):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return
+            time.sleep(0.05)
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            return
+
+    def _stop_daemon_from_pidfile(self) -> None:
+        if not self._daemon_autostarted:
+            return
+        if self._daemon_pid_path is None or not self._daemon_pid_path.exists():
+            return
+        try:
+            pid_text, parent_text = self._daemon_pid_path.read_text(encoding="utf-8").splitlines()[:2]
+            pid = int(pid_text)
+            parent = int(parent_text)
+        except Exception:
+            return
+        if parent != os.getpid():
+            return
+        self._terminate_pid(pid)
+        self._daemon_pid_path.unlink(missing_ok=True)
+
 
 def run() -> None:
     logging.basicConfig(
@@ -264,5 +326,6 @@ def run() -> None:
         available_models=config.available_models,
         default_model=config.default_model,
         daemon_autostart=config.cli_daemon_autostart,
+        daemon_pid_path=Path(config.data_dir) / "daemon.pid",
     )
     app.run()

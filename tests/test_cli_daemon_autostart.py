@@ -1,8 +1,13 @@
 import asyncio
+import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
+from yabot.cli import YabotCLIApp
 from yabot.cli_runtime import ensure_daemon
+from yabot.remote import RemoteGraphClient
 
 
 class FlakyClient:
@@ -53,3 +58,26 @@ async def test_ensure_daemon_no_autostart_raises():
 
     with pytest.raises(RuntimeError):
         await ensure_daemon(client, autostart=False, spawn=spawn, retries=2, delay=0)
+
+
+@pytest.mark.asyncio
+async def test_cli_closes_autostarted_daemon_process(tmp_path: Path):
+    pid_path = tmp_path / "daemon.pid"
+    app = YabotCLIApp(
+        graph=RemoteGraphClient("ws://127.0.0.1:1"),
+        daemon_pid_path=pid_path,
+    )
+    app._daemon_autostarted = True
+
+    proc = subprocess.Popen(["sleep", "10"])
+    try:
+        pid_path.write_text(f"{proc.pid}\n{os.getpid()}\n", encoding="utf-8")
+
+        await app._close_remote()
+
+        proc.wait(timeout=2)
+        assert not pid_path.exists()
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=2)

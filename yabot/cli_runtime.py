@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import os
 import sys
+from pathlib import Path
 from typing import Callable
 
 from .remote import RemoteGraphClient
@@ -34,5 +36,10 @@ async def ensure_daemon(
     return proc
 
 
-def spawn_daemon() -> subprocess.Popen[bytes]:
-    return subprocess.Popen([sys.executable, "-m", "yabot.daemon"])
+def spawn_daemon(pid_path: Path | None = None, parent_pid: int | None = None) -> subprocess.Popen[bytes]:
+    env = os.environ.copy()
+    if pid_path is not None:
+        env["YABOT_DAEMON_PID_PATH"] = str(pid_path)
+    if parent_pid is not None:
+        env["YABOT_DAEMON_PARENT_PID"] = str(parent_pid)
+    return subprocess.Popen([sys.executable, "-m", "yabot.daemon"], env=env)

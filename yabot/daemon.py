@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 from pathlib import Path
 
@@ -81,10 +82,16 @@ class YabotDaemon:
             )
 
 
-async def serve(host: str, port: int, graph: Any) -> None:
+async def serve(host: str, port: int, graph: Any, parent_pid: int | None = None) -> None:
     daemon = YabotDaemon(graph)
+    shutdown_event = asyncio.Event()
+    monitor_task: asyncio.Task[None] | None = None
+    if parent_pid is not None:
+        monitor_task = asyncio.create_task(_monitor_parent(parent_pid, shutdown_event))
     async with websockets.serve(daemon.handler, host, port):
-        await asyncio.Future()
+        await shutdown_event.wait()
+    if monitor_task is not None:
+        monitor_task.cancel()
 
 
 def run() -> None:
@@ -93,7 +100,7 @@ def run() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     config = load_config()
-    logging.info("Trace log path: %s", config.trace_path)
+    _write_pidfile()
     TraceLogger(Path(config.trace_path)).log(
         "daemon_startup",
         {
@@ -104,7 +111,40 @@ def run() -> None:
     host = config.daemon_host
     port = config.daemon_port
     logging.info("Starting Yabot daemon on ws://%s:%d", host, port)
-    asyncio.run(serve(host, port, graph))
+    parent_pid = _parent_pid_from_env()
+    asyncio.run(serve(host, port, graph, parent_pid=parent_pid))
+
+
+def _write_pidfile() -> None:
+    path = os.environ.get("YABOT_DAEMON_PID_PATH")
+    if not path:
+        return
+    parent = os.environ.get("YABOT_DAEMON_PARENT_PID", "")
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(f"{os.getpid()}\n{parent}\n", encoding="utf-8")
+    except OSError as exc:
+        logging.getLogger("yabot.daemon").warning("Failed to write pid file %s: %s", path, exc)
+
+
+def _parent_pid_from_env() -> int | None:
+    raw = os.environ.get("YABOT_DAEMON_PARENT_PID")
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+async def _monitor_parent(parent_pid: int, shutdown_event: asyncio.Event) -> None:
+    while True:
+        try:
+            os.kill(parent_pid, 0)
+        except OSError:
+            shutdown_event.set()
+            return
+        await asyncio.sleep(0.5)
 
 
 if __name__ == "__main__":
