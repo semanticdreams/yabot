@@ -377,9 +377,39 @@ class YabotGraph:
                     conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
             else:
                 if self.tracer:
-                    self.tracer.log("approval_response", {"request": request, "approved": False}, context=trace_ctx)
+                    self.tracer.log(
+                        "approval_response",
+                        {"request": request, "approved": False, "feedback": incoming},
+                        context=trace_ctx,
+                    )
                 state["approvals"]["pending"] = None
-                responses = ["Cancelled."]
+                _, conv = room_active_conv(state)
+                model = conv.get("model", self.default_model)
+                base_messages = list(conv.get("messages", []))
+                assistant_message = pending.get("assistant")
+                if assistant_message:
+                    base_messages.append(assistant_message)
+                base_messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Approval denied. Feedback: {incoming}",
+                    }
+                )
+                responses, new_messages, pending_next = await self._run_llm_loop(
+                    state,
+                    model,
+                    base_messages,
+                    trace_ctx,
+                )
+                if pending_next:
+                    state["approvals"]["pending"] = pending_next
+                elif new_messages is not None:
+                    conv_messages = list(conv.get("messages", []))
+                    if assistant_message:
+                        conv_messages.append(assistant_message)
+                    conv_messages.append(base_messages[-1])
+                    conv_messages.extend(new_messages)
+                    conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
 
             state["responses"] = responses
             return state

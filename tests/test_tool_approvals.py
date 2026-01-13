@@ -94,11 +94,11 @@ async def test_run_shell_requires_approval_and_remembers(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_run_shell_cancelled_on_non_y(tmp_path: Path):
+async def test_run_shell_denied_with_feedback(tmp_path: Path):
     out_path = tmp_path / "cancel.txt"
     args = json.dumps({"command": f"python -c \"open('{out_path}','w').write('ok')\"", "workdir": str(tmp_path)})
     tool_call = DummyToolCall("call-1", "run_shell", args)
-    llm = DummyLLM([DummyMessage(tool_calls=[tool_call])])
+    llm = DummyLLM([DummyMessage(tool_calls=[tool_call]), DummyMessage(content="ok")])
     graph = YabotGraph(
         llm=llm,
         default_model="gpt-4o-mini",
@@ -112,7 +112,7 @@ async def test_run_shell_cancelled_on_non_y(tmp_path: Path):
     result = await graph.ainvoke("room1", "nope")
 
     assert not out_path.exists()
-    assert result["responses"][0] == "Cancelled."
+    assert result["responses"][0] == "ok"
     assert result["approvals"]["pending"] is None
 
 
