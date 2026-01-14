@@ -40,6 +40,7 @@ class GraphState(TypedDict, total=False):
     plan_steps: List[str]
     plan_index: int
     route: str
+    agent_route: str
     command: Dict[str, str]
 
 
@@ -97,8 +98,11 @@ class YabotGraph:
         builder.add_node("pending", self._handle_pending)
         builder.add_node("command", self._handle_command)
         builder.add_node("prepare_chat", self._prepare_chat)
-        builder.add_node("plan", self._run_plan_node)
-        builder.add_node("llm", self._run_llm_node)
+        builder.add_node("agent_router", self._agent_router)
+        builder.add_node("plan_main", self._run_plan_main)
+        builder.add_node("plan_meta", self._run_plan_meta)
+        builder.add_node("llm_main", self._run_llm_main)
+        builder.add_node("llm_meta", self._run_llm_meta)
         builder.add_node("finalize", self._finalize)
         builder.set_entry_point("route")
         builder.add_conditional_edges(
@@ -106,15 +110,23 @@ class YabotGraph:
             self._route_choice,
             {"pending": "pending", "command": "command", "chat": "prepare_chat"},
         )
+        builder.add_edge("prepare_chat", "agent_router")
         builder.add_conditional_edges(
-            "prepare_chat",
-            self._plan_choice,
-            {"plan": "plan", "chat": "llm"},
+            "agent_router",
+            self._agent_route_choice,
+            {
+                "plan_main": "plan_main",
+                "plan_meta": "plan_meta",
+                "llm_main": "llm_main",
+                "llm_meta": "llm_meta",
+            },
         )
         builder.add_edge("pending", "finalize")
         builder.add_edge("command", "finalize")
-        builder.add_edge("plan", "finalize")
-        builder.add_edge("llm", "finalize")
+        builder.add_edge("plan_main", "finalize")
+        builder.add_edge("plan_meta", "finalize")
+        builder.add_edge("llm_main", "finalize")
+        builder.add_edge("llm_meta", "finalize")
         builder.add_edge("finalize", END)
         return builder.compile(checkpointer=self.checkpointer)
 
@@ -799,6 +811,9 @@ class YabotGraph:
     def _plan_choice(self, state: Dict[str, Any]) -> str:
         return "plan" if state.get("plan_steps") else "chat"
 
+    def _agent_route_choice(self, state: Dict[str, Any]) -> str:
+        return state.get("agent_route") or "llm_main"
+
     async def _route_input(self, state: Dict[str, Any]) -> Dict[str, Any]:
         incoming = (state.get("incoming") or "").strip()
         ensure_state(state, self.default_model)
@@ -1028,17 +1043,25 @@ class YabotGraph:
                     await stream_callback("[system] Plan:\n- " + "\n- ".join(plan_steps) + "\n")
         return state
 
-    async def _run_plan_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def _agent_router(self, state: Dict[str, Any]) -> Dict[str, Any]:
         active_agent = state.get("active_agent", "meta")
+        assert active_agent in {"main", "meta"}, f"unknown active_agent: {active_agent}"
+        agent_route = f"llm_{active_agent}"
+        if state.get("plan_steps"):
+            agent_route = f"plan_{active_agent}"
+        state["agent_route"] = agent_route
+        return state
+
+    async def _run_plan_for_agent(self, state: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
         conv_id, conv = room_active_conv(state)
         model = conv.get("model", self.default_model)
         agents_loaded = conv.setdefault("agents_loaded", [])
-        trace_ctx = self._trace_ctx(state, active_agent, conv_id, model)
-        tools = self._tools_for_agent(active_agent)
+        trace_ctx = self._trace_ctx(state, agent_name, conv_id, model)
+        tools = self._tools_for_agent(agent_name)
 
         start_index = int(state.get("plan_index", 0))
         responses, pending_next = await self._run_plan_steps(
-            state, model, conv, trace_ctx, agents_loaded, active_agent, tools, start_index
+            state, model, conv, trace_ctx, agents_loaded, agent_name, tools, start_index
         )
         if pending_next:
             state["responses"] = responses
@@ -1050,13 +1073,12 @@ class YabotGraph:
         state["responses"] = responses
         return state
 
-    async def _run_llm_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        active_agent = state.get("active_agent", "meta")
+    async def _run_llm_for_agent(self, state: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
         conv_id, conv = room_active_conv(state)
         model = conv.get("model", self.default_model)
         agents_loaded = conv.setdefault("agents_loaded", [])
-        trace_ctx = self._trace_ctx(state, active_agent, conv_id, model)
-        tools = self._tools_for_agent(active_agent)
+        trace_ctx = self._trace_ctx(state, agent_name, conv_id, model)
+        tools = self._tools_for_agent(agent_name)
 
         responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
             state,
@@ -1064,7 +1086,7 @@ class YabotGraph:
             conv.get("messages", []),
             trace_ctx,
             agents_loaded,
-            active_agent,
+            agent_name,
             tools,
         )
         if tool_notices:
@@ -1077,6 +1099,18 @@ class YabotGraph:
             conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
         state["responses"] = responses
         return state
+
+    async def _run_plan_main(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._run_plan_for_agent(state, "main")
+
+    async def _run_plan_meta(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._run_plan_for_agent(state, "meta")
+
+    async def _run_llm_main(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._run_llm_for_agent(state, "main")
+
+    async def _run_llm_meta(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._run_llm_for_agent(state, "meta")
 
     def _finalize(self, state: Dict[str, Any]) -> Dict[str, Any]:
         route = state.get("route")
