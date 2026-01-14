@@ -55,6 +55,18 @@ class StreamGraph:
         return {"responses": ["streamed"]}
 
 
+class StreamGraphMismatch:
+    async def ainvoke_stream(self, room_id: str, text: str, on_token):
+        await on_token("hello worl")
+        return {"responses": ["hello world"]}
+
+
+class StreamGraphMatch:
+    async def ainvoke_stream(self, room_id: str, text: str, on_token):
+        await on_token("hello world")
+        return {"responses": ["hello world"]}
+
+
 class DummyLLM:
     async def create_message(self, model, messages, tools=None):
         raise AssertionError("LLM should not be called for commands.")
@@ -119,3 +131,26 @@ async def test_cli_streams_llm_output():
 
     out_text = output.getvalue()
     assert out_text.count("streamed") == 1
+
+
+@pytest.mark.asyncio
+async def test_cli_corrects_stream_mismatch():
+    output = io.StringIO()
+    cli = YabotCLI(graph=StreamGraphMismatch(), input_fn=DummyInput(["go"]), output=output)
+
+    await cli.run_async()
+
+    out_text = output.getvalue()
+    assert "Output corrected from final response." in out_text
+    assert "hello world" in out_text
+
+
+@pytest.mark.asyncio
+async def test_cli_does_not_correct_when_stream_matches():
+    output = io.StringIO()
+    cli = YabotCLI(graph=StreamGraphMatch(), input_fn=DummyInput(["go"]), output=output)
+
+    await cli.run_async()
+
+    out_text = output.getvalue()
+    assert "Output corrected from final response." not in out_text

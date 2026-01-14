@@ -117,6 +117,64 @@ async def test_run_shell_denied_with_feedback(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_run_shell_failure_surfaces_stderr(tmp_path: Path):
+    args = json.dumps(
+        {
+            "command": "python -c \"import sys; sys.stderr.write('boom'); sys.exit(2)\"",
+            "workdir": str(tmp_path),
+        }
+    )
+    tool_call = DummyToolCall("call-1", "run_shell", args)
+    llm = DummyLLM([DummyMessage(tool_calls=[tool_call]), DummyMessage(content="done")])
+    graph = YabotGraph(
+        llm=llm,
+        default_model="gpt-4o-mini",
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        skills=SkillRegistry([]),
+        checkpointer=MemorySaver(),
+    )
+
+    result = await graph.ainvoke("room1", "run")
+    assert any("Approve running shell command" in r for r in result["responses"])
+
+    result = await graph.ainvoke("room1", "y")
+    joined = "\n".join(result["responses"])
+    assert "Shell command failed (exit 2)" in joined
+    assert "boom" in joined
+    assert "done" in joined
+
+
+@pytest.mark.asyncio
+async def test_run_shell_failure_surfaces_stdout_when_no_stderr(tmp_path: Path):
+    args = json.dumps(
+        {
+            "command": "python -c \"print('hi'); raise SystemExit(1)\"",
+            "workdir": str(tmp_path),
+        }
+    )
+    tool_call = DummyToolCall("call-1", "run_shell", args)
+    llm = DummyLLM([DummyMessage(tool_calls=[tool_call]), DummyMessage(content="done")])
+    graph = YabotGraph(
+        llm=llm,
+        default_model="gpt-4o-mini",
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        skills=SkillRegistry([]),
+        checkpointer=MemorySaver(),
+    )
+
+    result = await graph.ainvoke("room1", "run")
+    assert any("Approve running shell command" in r for r in result["responses"])
+
+    result = await graph.ainvoke("room1", "y")
+    joined = "\n".join(result["responses"])
+    assert "Shell command failed (exit 1)" in joined
+    assert "hi" in joined
+    assert "done" in joined
+
+
+@pytest.mark.asyncio
 async def test_fs_tool_approval_scopes_directory(tmp_path: Path):
     file_path = tmp_path / "note.txt"
     file_path.write_text("hi", encoding="utf-8")

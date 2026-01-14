@@ -149,11 +149,13 @@ class YabotCLI:
         completed = False
         streamed = False
         ended_with_newline = False
+        stream_chunks: list[str] = []
 
         async def on_token(chunk: str) -> None:
             nonlocal streamed, ended_with_newline
             streamed = True
             ended_with_newline = chunk.endswith("\n")
+            stream_chunks.append(chunk)
             await self._write_llm(chunk)
 
         graph_task = asyncio.create_task(self._call_graph(text, on_token))
@@ -169,6 +171,20 @@ class YabotCLI:
         else:
             if streamed and not ended_with_newline:
                 await self._write_llm("\n")
+            if streamed:
+                streamed_text = "".join(stream_chunks).strip()
+                responses = result.get("responses", []) or []
+                expected_lines = [
+                    line
+                    for line in responses
+                    if line
+                    and not line.startswith("[system]")
+                    and not line.startswith("Approve ")
+                ]
+                expected_text = "\n".join(expected_lines).strip()
+                if expected_text and expected_text != streamed_text:
+                    await self._print("[system] Output corrected from final response.")
+                    await self._print(expected_text)
             if not streamed:
                 await self._apply_result(result)
             completed = True

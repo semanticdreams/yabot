@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -41,6 +43,49 @@ class PlannerLLM:
         if "step one" in user:
             return self.Message("done one")
         if "step two" in user:
+            return self.Message("done two")
+        return self.Message("done")
+
+
+class PlanApprovalLLM:
+    class Message:
+        def __init__(self, content: str | None = None, tool_calls=None) -> None:
+            self.role = "assistant"
+            self.content = content
+            self.tool_calls = tool_calls or []
+
+    class ToolCall:
+        def __init__(self, call_id: str, name: str, arguments: str) -> None:
+            self.id = call_id
+            self.function = type("Fn", (), {"name": name, "arguments": arguments})()
+
+        def model_dump(self) -> dict:
+            return {
+                "id": self.id,
+                "function": {"name": self.function.name, "arguments": self.function.arguments},
+            }
+
+    def __init__(self, command: str) -> None:
+        self.command = command
+        self.calls: list[list[dict]] = []
+
+    async def create_message(self, model, messages, tools=None):
+        self.calls.append(messages)
+        system = messages[0].get("content", "") if messages else ""
+        if "planner" in system.lower():
+            return self.Message("- step one\n- step two")
+
+        last_user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+        has_tool = any(m.get("role") == "tool" for m in messages)
+        if "Execute step 1/2" in last_user and not has_tool:
+            args = json.dumps({"command": self.command})
+            return self.Message(tool_calls=[self.ToolCall("call-1", "run_shell", args)])
+        if "Execute step 1/2" in last_user and has_tool:
+            tool_msg = next(m for m in messages if m.get("role") == "tool")
+            payload = json.loads(tool_msg.get("content", "{}"))
+            assert "hi" in payload.get("stdout", "")
+            return self.Message("done one")
+        if "Execute step 2/2" in last_user:
             return self.Message("done two")
         return self.Message("done")
 
@@ -131,3 +176,27 @@ async def test_auto_plans_complex_requests():
     assert "[system] Step 2/2" in result["responses"][3]
     assert "done two" in result["responses"][4]
     assert len(llm.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_plan_resumes_after_approval_with_tool_output():
+    command = "python -c \"print('hi')\""
+    llm = PlanApprovalLLM(command)
+    graph = YabotGraph(
+        llm=llm,
+        default_model="gpt-4o-mini",
+        available_models=["gpt-4o-mini"],
+        max_turns=3,
+        skills=SkillRegistry([]),
+        checkpointer=MemorySaver(),
+    )
+
+    result = await graph.ainvoke("room1", "Please do A, then B with details.")
+
+    assert any("Approve running shell command" in r for r in result["responses"])
+
+    result = await graph.ainvoke("room1", "y")
+
+    assert any("done one" in r for r in result["responses"])
+    assert any("[system] Step 2/2" in r for r in result["responses"])
+    assert any("done two" in r for r in result["responses"])

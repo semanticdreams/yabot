@@ -453,9 +453,10 @@ class YabotGraph:
 
     async def _execute_tool_calls(
         self, tool_calls: List[dict[str, Any]], trace_ctx: dict[str, Any]
-    ) -> tuple[List[dict[str, Any]], List[dict[str, Any]]]:
+    ) -> tuple[List[dict[str, Any]], List[dict[str, Any]], List[str]]:
         tool_messages: List[dict[str, Any]] = []
         system_messages: List[dict[str, Any]] = []
+        result_notices: List[str] = []
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
@@ -485,6 +486,22 @@ class YabotGraph:
                         result = f"ERROR: unknown skill tool {name}"
                 else:
                     result = await execute_tool_async(name, arguments)
+                if name == "run_shell":
+                    try:
+                        payload = json.loads(result)
+                    except json.JSONDecodeError:
+                        payload = {}
+                    if payload.get("error"):
+                        result_notices.append(f"[system] Shell error: {payload['error']}")
+                    else:
+                        returncode = payload.get("returncode")
+                        stderr = (payload.get("stderr") or "").strip()
+                        stdout = (payload.get("stdout") or "").strip()
+                        if isinstance(returncode, int) and returncode != 0:
+                            detail = stderr or stdout or "no output"
+                            result_notices.append(
+                                f"[system] Shell command failed (exit {returncode}): {detail}"
+                            )
                 if self.tracer:
                     self.tracer.log(
                         "tool_result",
@@ -504,7 +521,7 @@ class YabotGraph:
                     "content": result,
                 }
             )
-        return tool_messages, system_messages
+        return tool_messages, system_messages, result_notices
 
     # shell execution lives in tools.run_shell and is dispatched via execute_tool_async
 
@@ -589,9 +606,13 @@ class YabotGraph:
 
                 missing = self._first_missing_approval(state, tool_calls)
                 if missing:
+                    stream_callback = self._stream_callback.get()
+                    prompt = self._approval_prompt(missing)
+                    if stream_callback:
+                        await stream_callback(prompt + "\n")
                     if self.tracer:
                         self.tracer.log("approval_request", {"request": missing}, context=trace_ctx)
-                    return [self._approval_prompt(missing)], None, {
+                    return [prompt], None, {
                         "request": missing,
                         "assistant": assistant_message,
                         "tool_calls": tool_calls,
@@ -603,12 +624,16 @@ class YabotGraph:
                     if injected:
                         new_messages.extend(injected)
 
-                tool_messages, system_messages = await self._execute_tool_calls(tool_calls, trace_ctx)
+                tool_messages, system_messages, result_notices = await self._execute_tool_calls(
+                    tool_calls, trace_ctx
+                )
                 new_messages.extend(tool_messages)
                 working_messages.extend(tool_messages)
                 if system_messages:
                     new_messages.extend(system_messages)
                     working_messages.extend(system_messages)
+                if result_notices:
+                    tool_notices.extend(result_notices)
                 tool_calls = None
                 continue
 
