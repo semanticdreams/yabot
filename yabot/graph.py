@@ -134,10 +134,52 @@ class YabotGraph:
         if not system_prompt:
             return
         messages = conv.get("messages", [])
+        target = system_prompt.strip()
+        legacy_prompts = {prompt.strip() for prompt in self._legacy_system_prompts()}
+        updated: List[dict[str, Any]] = []
+        found = False
         for msg in messages:
-            if msg.get("role") == "system" and msg.get("content") == system_prompt:
-                return
-        conv["messages"] = [{"role": "system", "content": system_prompt}] + list(messages)
+            if msg.get("role") == "system":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    content_norm = content.strip()
+                else:
+                    content_norm = None
+                if content_norm == target:
+                    found = True
+                    updated.append({"role": "system", "content": system_prompt})
+                    continue
+                if content_norm in legacy_prompts:
+                    continue
+                if isinstance(content_norm, str) and content_norm.startswith("You are Yabot"):
+                    continue
+            updated.append(msg)
+        if not found:
+            updated = [{"role": "system", "content": system_prompt}] + updated
+        conv["messages"] = updated
+
+    @staticmethod
+    def _legacy_system_prompts() -> set[str]:
+        legacy_main = "\n".join(
+            [
+                "You are Yabot, a coding-first assistant.",
+                "Primary task: help with software engineering tasks (code, tests, debugging, refactors).",
+                "Always follow project instructions in any AGENTS.md file relevant to the task.",
+                "If the user doesn't specify a target directory, assume the current working directory is the target.",
+                "For filesystem actions (listing, reading, writing, creating directories), always use the available tools.",
+                "Be concise and precise. Ask clarifying questions only when needed.",
+            ]
+        )
+        legacy_meta = "\n".join(
+            [
+                "You are the Yabot meta agent.",
+                "You can manage and query the main agent on the user's behalf.",
+                "Use agent tools when the user asks to change the main agent, ask it questions, or inspect its tool calls.",
+                "You may answer directly when no delegation is needed.",
+                "Be concise and precise. Ask clarifying questions only when needed.",
+            ]
+        )
+        return {legacy_main, legacy_meta}
 
     def _system_prompt_for_agent(self, agent_name: str) -> str | None:
         if agent_name == "meta":
@@ -219,7 +261,7 @@ class YabotGraph:
         trace_ctx: dict[str, Any],
     ) -> List[str]:
         planner_prompt = (
-            "You are a planner. Return a concise todo list for the task.\n"
+            "You are planner. Return a concise todo list for the task.\n"
             "Use 3-7 bullets, each starting with '- '. No extra text."
         )
         if self.tracer:
@@ -817,6 +859,7 @@ class YabotGraph:
     async def _route_input(self, state: Dict[str, Any]) -> Dict[str, Any]:
         incoming = (state.get("incoming") or "").strip()
         ensure_state(state, self.default_model)
+        self._refresh_system_prompts(state)
         active_agent = state.get("active_agent", "meta")
         conv_id, conv = room_active_conv(state)
         model = conv.get("model", self.default_model)
@@ -844,6 +887,17 @@ class YabotGraph:
 
         state["route"] = "chat"
         return state
+
+    def _refresh_system_prompts(self, state: Dict[str, Any]) -> None:
+        agents = state.get("agents") or {}
+        for name, agent in agents.items():
+            prompt = self._system_prompt_for_agent(name)
+            if not prompt:
+                continue
+            conversations = agent.get("conversations", {})
+            for conv in conversations.values():
+                if isinstance(conv, dict):
+                    self._ensure_system_prompt(conv, prompt)
 
     async def _handle_pending(self, state: Dict[str, Any]) -> Dict[str, Any]:
         incoming = (state.get("incoming") or "").strip()
@@ -1004,6 +1058,9 @@ class YabotGraph:
             self.tracer.log("command", {"command": cmd, "arg": arg}, context=trace_ctx)
         before_agent = active_agent
         responses = [handle_command(state, cmd, arg, self.available_models, self.default_model)]
+        state["plan"] = []
+        state["plan_steps"] = []
+        state["plan_index"] = 0
         if cmd == "become":
             after_agent = state.get("active_agent", before_agent)
             trace_ctx["agent"] = after_agent
@@ -1026,6 +1083,10 @@ class YabotGraph:
         conv_messages = conv.get("messages", [])
         conv_messages.append({"role": "user", "content": incoming})
         conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+
+        state["plan"] = []
+        state["plan_steps"] = []
+        state["plan_index"] = 0
 
         plan_steps: List[str] = []
         if self._is_complex_task(incoming):

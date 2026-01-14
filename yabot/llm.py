@@ -19,12 +19,13 @@ class LLMClient:
         tools_payload = tools if tools is not None else TOOLS
         if tools is not None and not tools:
             tools_payload = None
-            tool_choice = "none"
+            tool_choice = None
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "tool_choice": tool_choice,
         }
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
         if tools_payload is not None:
             kwargs["tools"] = tools_payload
         response = await self.client.chat.completions.create(**kwargs)
@@ -45,13 +46,14 @@ class LLMClient:
         tools_payload = tools if tools is not None else TOOLS
         if tools is not None and not tools:
             tools_payload = None
-            tool_choice = "none"
+            tool_choice = None
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "tool_choice": tool_choice,
             "stream": True,
         }
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
         if tools_payload is not None:
             kwargs["tools"] = tools_payload
         response = await self.client.chat.completions.create(**kwargs)

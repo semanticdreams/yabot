@@ -1,4 +1,7 @@
-.PHONY: test graph
+.PHONY: test graph install
+
+install:
+	uv tool install --force --editable .
 
 test:
 	PYTHONPATH=. uv run --project . python -m pytest
