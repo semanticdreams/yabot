@@ -9,7 +9,12 @@ from typing import Any, Dict, List, Optional, TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
+from .agent_tools import META_AGENT_TOOLS
 from .commands import (
+    agent_active_conv,
+    agent_recent_tool_calls,
+    agent_record_tool_calls,
+    agent_set_model,
     ensure_state,
     handle_command,
     parse_command,
@@ -27,6 +32,8 @@ class GraphState(TypedDict, total=False):
     responses: List[str]
     conversations: Dict[str, Dict[str, Any]]
     active: str
+    agents: Dict[str, Dict[str, Any]]
+    active_agent: str
     approvals: Dict[str, Any]
     trace: Dict[str, Any]
     plan: List[str]
@@ -45,6 +52,7 @@ class YabotGraph:
         checkpointer: Any | None = None,
         tracer: Any | None = None,
         system_prompt: str | None = None,
+        meta_system_prompt: str | None = None,
     ) -> None:
         self.llm = llm
         self.default_model = default_model
@@ -56,6 +64,7 @@ class YabotGraph:
         self.checkpointer = checkpointer or MemorySaver()
         self.tracer = tracer
         self.system_prompt = system_prompt
+        self.meta_system_prompt = meta_system_prompt
         self._stream_callback: contextvars.ContextVar = contextvars.ContextVar("yabot_stream_callback", default=None)
         self.graph = self._build_graph()
 
@@ -87,14 +96,24 @@ class YabotGraph:
         builder.add_edge("process", END)
         return builder.compile(checkpointer=self.checkpointer)
 
-    def _ensure_system_prompt(self, conv: Dict[str, Any]) -> None:
-        if not self.system_prompt:
+    def _ensure_system_prompt(self, conv: Dict[str, Any], system_prompt: str | None) -> None:
+        if not system_prompt:
             return
         messages = conv.get("messages", [])
         for msg in messages:
-            if msg.get("role") == "system" and msg.get("content") == self.system_prompt:
+            if msg.get("role") == "system" and msg.get("content") == system_prompt:
                 return
-        conv["messages"] = [{"role": "system", "content": self.system_prompt}] + list(messages)
+        conv["messages"] = [{"role": "system", "content": system_prompt}] + list(messages)
+
+    def _system_prompt_for_agent(self, agent_name: str) -> str | None:
+        if agent_name == "meta":
+            return self.meta_system_prompt
+        return self.system_prompt
+
+    def _tools_for_agent(self, agent_name: str) -> List[dict[str, Any]]:
+        if agent_name == "meta":
+            return list(META_AGENT_TOOLS)
+        return self.base_tools + self.skill_tools
 
     def _tool_calls_to_dicts(self, tool_calls: Any) -> List[dict[str, Any]]:
         normalized: List[dict[str, Any]] = []
@@ -189,6 +208,8 @@ class YabotGraph:
         conv: Dict[str, Any],
         trace_ctx: dict[str, Any],
         agents_loaded: List[str],
+        agent_name: str,
+        tools: List[dict[str, Any]],
         start_index: int | None = None,
     ) -> tuple[List[str], dict[str, Any] | None]:
         steps = list(state.get("plan_steps") or [])
@@ -217,6 +238,8 @@ class YabotGraph:
                 conv.get("messages", []),
                 trace_ctx,
                 agents_loaded,
+                agent_name,
+                tools,
             )
             if tool_notices:
                 responses.extend(tool_notices)
@@ -430,7 +453,12 @@ class YabotGraph:
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
-            if self.skills.is_skill_tool(name) or name == "ask_user":
+            if self.skills.is_skill_tool(name) or name in {
+                "ask_user",
+                "agent_ask",
+                "agent_set_model",
+                "agent_recent_tool_calls",
+            }:
                 continue
             raw_args = function.get("arguments") or "{}"
             try:
@@ -452,7 +480,11 @@ class YabotGraph:
         return None
 
     async def _execute_tool_calls(
-        self, tool_calls: List[dict[str, Any]], trace_ctx: dict[str, Any]
+        self,
+        state: Dict[str, Any],
+        agent_name: str,
+        tool_calls: List[dict[str, Any]],
+        trace_ctx: dict[str, Any],
     ) -> tuple[List[dict[str, Any]], List[dict[str, Any]], List[str]]:
         tool_messages: List[dict[str, Any]] = []
         system_messages: List[dict[str, Any]] = []
@@ -463,6 +495,9 @@ class YabotGraph:
             assert name, "tool call missing name"
             assert self.skills.is_skill_tool(name) or name in {
                 "ask_user",
+                "agent_ask",
+                "agent_set_model",
+                "agent_recent_tool_calls",
                 "list_dir",
                 "read_file",
                 "write_file",
@@ -484,6 +519,45 @@ class YabotGraph:
                         result = f"Skill applied: {skill.name}"
                     else:
                         result = f"ERROR: unknown skill tool {name}"
+                elif name == "agent_set_model":
+                    target = str(arguments.get("agent", "main")).strip().lower()
+                    model = str(arguments.get("model", "")).strip()
+                    if not target or not model:
+                        result = "ERROR: agent and model are required"
+                    else:
+                        updated = agent_set_model(state, target, model, self.available_models)
+                        result = (
+                            f"Model set to `{model}` for `{target}`."
+                            if updated
+                            else f"ERROR: unknown model `{model}` or agent `{target}`"
+                        )
+                        if self.tracer:
+                            self.tracer.log(
+                                "agent_set_model",
+                                {"agent": target, "model": model, "ok": updated},
+                                context=trace_ctx,
+                            )
+                elif name == "agent_recent_tool_calls":
+                    target = str(arguments.get("agent", "main")).strip().lower()
+                    try:
+                        limit = int(arguments.get("limit", 10) or 10)
+                    except (TypeError, ValueError):
+                        limit = 10
+                    history = agent_recent_tool_calls(state, target, limit=limit)
+                    result = json.dumps(history)
+                    if self.tracer:
+                        self.tracer.log(
+                            "agent_recent_tool_calls",
+                            {"agent": target, "count": len(history)},
+                            context=trace_ctx,
+                        )
+                elif name == "agent_ask":
+                    target = str(arguments.get("agent", "main")).strip().lower()
+                    text = str(arguments.get("text", "")).strip()
+                    if not text:
+                        result = "ERROR: text is required"
+                    else:
+                        result = await self._agent_ask(state, target, text, trace_ctx)
                 else:
                     result = await execute_tool_async(name, arguments)
                 if name == "run_shell":
@@ -525,6 +599,45 @@ class YabotGraph:
 
     # shell execution lives in tools.run_shell and is dispatched via execute_tool_async
 
+    async def _agent_ask(
+        self,
+        state: Dict[str, Any],
+        agent_name: str,
+        text: str,
+        trace_ctx: dict[str, Any],
+    ) -> str:
+        conv_id, conv = agent_active_conv(state, agent_name)
+        if not conv_id or not conv:
+            return f"ERROR: unknown agent `{agent_name}`"
+        model = conv.get("model", self.default_model)
+        self._ensure_system_prompt(conv, self._system_prompt_for_agent(agent_name))
+        conv_messages = conv.get("messages", [])
+        conv_messages.append({"role": "user", "content": text})
+        conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+        if self.tracer:
+            self.tracer.log(
+                "agent_invoke",
+                {"agent": agent_name, "model": model, "text": text},
+                context=trace_ctx,
+            )
+        message = await self.llm.create_message(model, conv.get("messages", []), tools=[])
+        assistant_message = self._message_to_dict(message)
+        stripped = self._assistant_without_tool_calls(assistant_message)
+        if stripped:
+            conv_messages = conv.get("messages", [])
+            conv_messages.append(stripped)
+            conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+        response_text = (assistant_message.get("content") or "").strip()
+        if not response_text:
+            response_text = "…(no output)"
+        if self.tracer:
+            self.tracer.log(
+                "agent_response",
+                {"agent": agent_name, "response": response_text},
+                context=trace_ctx,
+            )
+        return response_text
+
     async def _run_llm_loop(
         self,
         state: Dict[str, Any],
@@ -532,6 +645,8 @@ class YabotGraph:
         messages: List[dict[str, Any]],
         trace_ctx: dict[str, Any],
         agents_loaded: List[str],
+        agent_name: str,
+        tools: List[dict[str, Any]],
         initial_tool_calls: List[dict[str, Any]] | None = None,
         initial_assistant: dict[str, Any] | None = None,
     ) -> tuple[List[str], List[dict[str, Any]] | None, dict[str, Any] | None, List[str]]:
@@ -555,7 +670,7 @@ class YabotGraph:
                         {
                             "model": model,
                             "messages": self._normalize_messages_for_llm(working_messages),
-                            "tools": [t.get("function", {}).get("name") for t in self.base_tools + self.skill_tools],
+                            "tools": [t.get("function", {}).get("name") for t in tools],
                         },
                         context=trace_ctx,
                     )
@@ -565,12 +680,12 @@ class YabotGraph:
                     message = await self.llm.create_message_stream(
                         model,
                         safe_messages,
-                        tools=self.base_tools + self.skill_tools,
+                        tools=tools,
                         on_token=stream_callback,
                     )
                 else:
                     message = await self.llm.create_message(
-                        model, safe_messages, tools=self.base_tools + self.skill_tools
+                        model, safe_messages, tools=tools
                     )
                 assistant_message = self._message_to_dict(message)
                 if self.tracer:
@@ -584,6 +699,8 @@ class YabotGraph:
                 tool_calls = self._tool_calls_to_dicts(raw_tool_calls)
                 if self.tracer and tool_calls:
                     self.tracer.log("tool_calls", {"calls": tool_calls}, context=trace_ctx)
+                if tool_calls:
+                    agent_record_tool_calls(state, agent_name, tool_calls)
 
             if tool_calls:
                 notices = self._tool_call_notices(tool_calls)
@@ -602,6 +719,7 @@ class YabotGraph:
                         return [question], None, {
                             "request": {"kind": "ask_user", "tool_call_id": call.get("id", "")},
                             "assistant": assistant_message,
+                            "agent": agent_name,
                         }, tool_notices
 
                 missing = self._first_missing_approval(state, tool_calls)
@@ -616,6 +734,7 @@ class YabotGraph:
                         "request": missing,
                         "assistant": assistant_message,
                         "tool_calls": tool_calls,
+                        "agent": agent_name,
                     }, tool_notices
 
                 agent_paths = self._agents_paths_for_tool_calls(tool_calls)
@@ -625,7 +744,7 @@ class YabotGraph:
                         new_messages.extend(injected)
 
                 tool_messages, system_messages, result_notices = await self._execute_tool_calls(
-                    tool_calls, trace_ctx
+                    state, agent_name, tool_calls, trace_ctx
                 )
                 new_messages.extend(tool_messages)
                 working_messages.extend(tool_messages)
@@ -652,11 +771,12 @@ class YabotGraph:
         ensure_state(state, self.default_model)
         trace_ctx = dict(state.get("trace") or {})
 
+        active_agent = state.get("active_agent", "meta")
         conv_id, conv = room_active_conv(state)
         model = conv.get("model", self.default_model)
         agents_loaded = conv.setdefault("agents_loaded", [])
-        trace_ctx.update({"conv_id": conv_id, "model": model})
-        self._ensure_system_prompt(conv)
+        trace_ctx.update({"conv_id": conv_id, "model": model, "agent": active_agent})
+        self._ensure_system_prompt(conv, self._system_prompt_for_agent(active_agent))
         conv_messages = conv.get("messages", [])
         self._inject_agents_messages(agents_loaded, conv_messages, [Path(os.getcwd())])
         conv["messages"] = conv_messages
@@ -666,6 +786,10 @@ class YabotGraph:
 
         pending = state["approvals"].get("pending")
         if pending:
+            pending_agent = pending.get("agent", active_agent)
+            pending_tools = self._tools_for_agent(pending_agent)
+            pending_prompt = self._system_prompt_for_agent(pending_agent)
+            pending_trace = dict(trace_ctx)
             request = pending.get("request") or {}
             if request.get("kind") == "ask_user":
                 tool_call_id = request.get("tool_call_id", "")
@@ -676,8 +800,11 @@ class YabotGraph:
                     "content": incoming,
                 }
                 state["approvals"]["pending"] = None
-                _, conv = room_active_conv(state)
+                conv_id, conv = agent_active_conv(state, pending_agent)
                 model = conv.get("model", self.default_model)
+                agents_loaded = conv.setdefault("agents_loaded", [])
+                self._ensure_system_prompt(conv, pending_prompt)
+                pending_trace.update({"conv_id": conv_id, "model": model, "agent": pending_agent})
                 base_messages = list(conv.get("messages", []))
                 if assistant_message:
                     base_messages.append(assistant_message)
@@ -686,8 +813,10 @@ class YabotGraph:
                     state,
                     model,
                     base_messages,
-                    trace_ctx,
+                    pending_trace,
                     agents_loaded,
+                    pending_agent,
+                    pending_tools,
                 )
                 if tool_notices:
                     responses = tool_notices + responses
@@ -707,16 +836,21 @@ class YabotGraph:
                     self._approve_dir(state, request.get("dir", ""))
 
                 if self.tracer:
-                    self.tracer.log("approval_response", {"request": request, "approved": True}, context=trace_ctx)
+                    self.tracer.log("approval_response", {"request": request, "approved": True}, context=pending_trace)
                 state["approvals"]["pending"] = None
-                _, conv = room_active_conv(state)
+                conv_id, conv = agent_active_conv(state, pending_agent)
                 model = conv.get("model", self.default_model)
+                agents_loaded = conv.setdefault("agents_loaded", [])
+                self._ensure_system_prompt(conv, pending_prompt)
+                pending_trace.update({"conv_id": conv_id, "model": model, "agent": pending_agent})
                 responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
                     state,
                     model,
                     conv.get("messages", []),
-                    trace_ctx,
+                    pending_trace,
                     agents_loaded,
+                    pending_agent,
+                    pending_tools,
                     initial_tool_calls=pending.get("tool_calls"),
                     initial_assistant=pending.get("assistant"),
                 )
@@ -733,11 +867,14 @@ class YabotGraph:
                     self.tracer.log(
                         "approval_response",
                         {"request": request, "approved": False, "feedback": incoming},
-                        context=trace_ctx,
+                        context=pending_trace,
                     )
                 state["approvals"]["pending"] = None
-                _, conv = room_active_conv(state)
+                conv_id, conv = agent_active_conv(state, pending_agent)
                 model = conv.get("model", self.default_model)
+                agents_loaded = conv.setdefault("agents_loaded", [])
+                self._ensure_system_prompt(conv, pending_prompt)
+                pending_trace.update({"conv_id": conv_id, "model": model, "agent": pending_agent})
                 base_messages = list(conv.get("messages", []))
                 assistant_message = pending.get("assistant")
                 stripped = self._assistant_without_tool_calls(assistant_message)
@@ -755,6 +892,8 @@ class YabotGraph:
                     base_messages,
                     trace_ctx,
                     agents_loaded,
+                    pending_agent,
+                    pending_tools,
                 )
                 if tool_notices:
                     responses = tool_notices + responses
@@ -773,7 +912,13 @@ class YabotGraph:
             if pending_next is None and state.get("plan_steps"):
                 state["plan_index"] = int(state.get("plan_index", 0)) + 1
                 follow_responses, follow_pending = await self._run_plan_steps(
-                    state, model, conv, trace_ctx, agents_loaded
+                    state,
+                    model,
+                    conv,
+                    trace_ctx,
+                    agents_loaded,
+                    pending_agent,
+                    pending_tools,
                 )
                 responses.extend(follow_responses)
                 if follow_pending:
@@ -787,7 +932,17 @@ class YabotGraph:
             cmd, arg = parsed
             if self.tracer:
                 self.tracer.log("command", {"command": cmd, "arg": arg}, context=trace_ctx)
+            before_agent = active_agent
             responses = [handle_command(state, cmd, arg, self.available_models, self.default_model)]
+            if cmd == "become":
+                after_agent = state.get("active_agent", before_agent)
+                trace_ctx["agent"] = after_agent
+                if self.tracer:
+                    self.tracer.log(
+                        "agent_switch",
+                        {"from": before_agent, "to": after_agent},
+                        context=trace_ctx,
+                    )
             state["responses"] = responses
             return state
 
@@ -813,17 +968,23 @@ class YabotGraph:
                     await stream_callback("[system] Plan:\n- " + "\n- ".join(plan_steps) + "\n")
 
         if plan_steps:
-            responses, pending_next = await self._run_plan_steps(state, model, conv, trace_ctx, agents_loaded, 0)
+            tools = self._tools_for_agent(active_agent)
+            responses, pending_next = await self._run_plan_steps(
+                state, model, conv, trace_ctx, agents_loaded, active_agent, tools, 0
+            )
             if pending_next:
                 state["responses"] = responses
                 return state
         else:
+            tools = self._tools_for_agent(active_agent)
             responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
                 state,
                 model,
                 conv.get("messages", []),
                 trace_ctx,
                 agents_loaded,
+                active_agent,
+                tools,
             )
             if tool_notices:
                 responses = tool_notices + responses

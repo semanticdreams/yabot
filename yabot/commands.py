@@ -12,6 +12,7 @@ from .tokens import (
 
 
 CMD_RE = re.compile(r"^!([\w-]+)(?:\s+(.*))?$")
+AGENT_NAMES = ("main", "meta")
 
 
 def help_text() -> str:
@@ -19,6 +20,7 @@ def help_text() -> str:
         "Commands:\n"
         "!models\n"
         "!model <name>\n"
+        "!become <main|meta>\n"
         "!new\n"
         "!list\n"
         "!use <id>\n"
@@ -41,12 +43,74 @@ def parse_command(text: str) -> Tuple[str, str] | None:
 
 
 def ensure_state(state: State, default_model: str) -> None:
-    if "conversations" not in state:
-        conv_id = _new_conv_id()
-        state["active"] = conv_id
-        state["conversations"] = {conv_id: {"model": default_model, "messages": []}}
+    if "agents" not in state:
+        if "conversations" in state and "active" in state:
+            main_state = {
+                "active": state.get("active"),
+                "conversations": state.get("conversations", {}),
+                "tool_history": state.get("tool_history", []),
+            }
+        else:
+            main_state = _init_agent_state(default_model)
+        state["agents"] = {
+            "main": main_state,
+            "meta": _init_agent_state(default_model),
+        }
+    if "active_agent" not in state:
+        state["active_agent"] = "meta"
+    _sync_active_agent_state(state)
     if "approvals" not in state:
         state["approvals"] = {"shell": [], "dirs": [], "pending": None}
+
+
+def set_active_agent(state: State, agent: str) -> None:
+    state["active_agent"] = agent
+    _sync_active_agent_state(state)
+
+
+def agent_state(state: State, agent: str) -> Dict[str, Any]:
+    agents = state.get("agents", {})
+    return agents.get(agent, {})
+
+
+def agent_active_conv(state: State, agent: str) -> Tuple[str | None, Dict[str, Any]]:
+    state_agent = agent_state(state, agent)
+    conv_id = state_agent.get("active")
+    if not conv_id:
+        return None, {}
+    return conv_id, state_agent.get("conversations", {}).get(conv_id, {})
+
+
+def agent_set_model(state: State, agent: str, model: str, available_models: List[str]) -> bool:
+    if model not in available_models:
+        return False
+    _, conv = agent_active_conv(state, agent)
+    if not conv:
+        return False
+    conv["model"] = model
+    return True
+
+
+def agent_record_tool_calls(state: State, agent: str, tool_calls: List[Dict[str, Any]]) -> None:
+    state_agent = agent_state(state, agent)
+    history = state_agent.setdefault("tool_history", [])
+    for call in tool_calls:
+        function = call.get("function") or {}
+        history.append(
+            {
+                "id": call.get("id", ""),
+                "name": function.get("name", ""),
+                "arguments": function.get("arguments", ""),
+            }
+        )
+    if len(history) > 50:
+        state_agent["tool_history"] = history[-50:]
+
+
+def agent_recent_tool_calls(state: State, agent: str, limit: int = 10) -> List[Dict[str, Any]]:
+    state_agent = agent_state(state, agent)
+    history = list(state_agent.get("tool_history", []))
+    return history[-max(1, limit) :]
 
 
 def active_conversation_meta(state: State) -> Tuple[str | None, str | None]:
@@ -65,7 +129,7 @@ def room_active_conv(state: State) -> Tuple[str, Dict[str, Any]]:
 def room_new_conv(state: State, default_model: str) -> str:
     conv_id = _new_conv_id()
     state["conversations"][conv_id] = {"model": default_model, "messages": []}
-    state["active"] = conv_id
+    _set_active_conv(state, conv_id)
     return conv_id
 
 
@@ -81,7 +145,7 @@ def room_list_convs(state: State) -> List[Tuple[str, str, int, bool]]:
 def room_use_conv(state: State, conv_id: str) -> bool:
     if conv_id not in state["conversations"]:
         return False
-    state["active"] = conv_id
+    _set_active_conv(state, conv_id)
     return True
 
 
@@ -115,6 +179,14 @@ def handle_command(
         if not room_set_model(state, arg, available_models):
             return f"Unknown model `{arg}`.\nUse !models."
         return f"Model set to `{arg}` for this room’s active conversation."
+    if cmd == "become":
+        if not arg:
+            return "Usage: !become <main|meta>"
+        agent = arg.lower()
+        if agent not in AGENT_NAMES:
+            return f"Unknown agent `{arg}`. Available: main, meta."
+        set_active_agent(state, agent)
+        return f"Active agent is now `{agent}`."
     if cmd == "new":
         cid = room_new_conv(state, default_model)
         return f"Started new conversation for this room: `{cid}`"
@@ -190,3 +262,36 @@ def trim_messages(messages: List[Dict[str, Any]], model: str, max_turns: int) ->
 
 def _new_conv_id() -> str:
     return str(uuid.uuid4())[:8]
+
+
+def _init_agent_state(default_model: str) -> Dict[str, Any]:
+    conv_id = _new_conv_id()
+    return {
+        "active": conv_id,
+        "conversations": {conv_id: {"model": default_model, "messages": []}},
+        "tool_history": [],
+    }
+
+
+def _sync_active_agent_state(state: State) -> None:
+    active_agent = state.get("active_agent")
+    agents = state.get("agents", {})
+    if active_agent not in agents:
+        active_agent = "meta" if "meta" in agents else next(iter(agents), None)
+        state["active_agent"] = active_agent
+    if not active_agent:
+        return
+    agent = agents.get(active_agent, {})
+    state["active"] = agent.get("active")
+    state["conversations"] = agent.get("conversations", {})
+
+
+def _set_active_conv(state: State, conv_id: str) -> None:
+    state["active"] = conv_id
+    active_agent = state.get("active_agent")
+    if not active_agent:
+        return
+    agent = state.get("agents", {}).get(active_agent)
+    if agent is None:
+        return
+    agent["active"] = conv_id

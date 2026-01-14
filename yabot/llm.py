@@ -10,15 +10,24 @@ class LLMClient:
     def __init__(self, api_key: str) -> None:
         self.client = AsyncOpenAI(api_key=api_key)
 
-    async def create_message(self, model: str, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]] | None = None):
+    async def create_message(
+        self, model: str, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]] | None = None
+    ):
         assert model, "model must be set"
         assert isinstance(messages, list), "messages must be a list"
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools or TOOLS,
-            tool_choice="auto",
-        )
+        tool_choice = "auto"
+        tools_payload = tools if tools is not None else TOOLS
+        if tools is not None and not tools:
+            tools_payload = None
+            tool_choice = "none"
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "tool_choice": tool_choice,
+        }
+        if tools_payload is not None:
+            kwargs["tools"] = tools_payload
+        response = await self.client.chat.completions.create(**kwargs)
         assert response.choices, "LLM response missing choices"
         assert response.choices[0].message is not None, "LLM response missing message"
         return response.choices[0].message
@@ -32,13 +41,20 @@ class LLMClient:
     ) -> Dict[str, Any]:
         assert model, "model must be set"
         assert isinstance(messages, list), "messages must be a list"
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools or TOOLS,
-            tool_choice="auto",
-            stream=True,
-        )
+        tool_choice = "auto"
+        tools_payload = tools if tools is not None else TOOLS
+        if tools is not None and not tools:
+            tools_payload = None
+            tool_choice = "none"
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "tool_choice": tool_choice,
+            "stream": True,
+        }
+        if tools_payload is not None:
+            kwargs["tools"] = tools_payload
+        response = await self.client.chat.completions.create(**kwargs)
         assert response is not None, "LLM stream response is None"
         content_chunks: List[str] = []
         tool_calls_by_index: Dict[int, Dict[str, Any]] = {}

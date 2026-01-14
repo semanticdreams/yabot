@@ -3,5 +3,5 @@
 test:
 	PYTHONPATH=. uv run --project . python -m pytest
 
-graph:
+render-graph:
 	PYTHONPATH=. uv run --project . python scripts/render_graph.py
