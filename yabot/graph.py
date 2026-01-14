@@ -39,6 +39,8 @@ class GraphState(TypedDict, total=False):
     plan: List[str]
     plan_steps: List[str]
     plan_index: int
+    route: str
+    command: Dict[str, str]
 
 
 class YabotGraph:
@@ -91,9 +93,29 @@ class YabotGraph:
 
     def _build_graph(self):
         builder: StateGraph = StateGraph(GraphState)
-        builder.add_node("process", self._process_input)
-        builder.set_entry_point("process")
-        builder.add_edge("process", END)
+        builder.add_node("route", self._route_input)
+        builder.add_node("pending", self._handle_pending)
+        builder.add_node("command", self._handle_command)
+        builder.add_node("prepare_chat", self._prepare_chat)
+        builder.add_node("plan", self._run_plan_node)
+        builder.add_node("llm", self._run_llm_node)
+        builder.add_node("finalize", self._finalize)
+        builder.set_entry_point("route")
+        builder.add_conditional_edges(
+            "route",
+            self._route_choice,
+            {"pending": "pending", "command": "command", "chat": "prepare_chat"},
+        )
+        builder.add_conditional_edges(
+            "prepare_chat",
+            self._plan_choice,
+            {"plan": "plan", "chat": "llm"},
+        )
+        builder.add_edge("pending", "finalize")
+        builder.add_edge("command", "finalize")
+        builder.add_edge("plan", "finalize")
+        builder.add_edge("llm", "finalize")
+        builder.add_edge("finalize", END)
         return builder.compile(checkpointer=self.checkpointer)
 
     def _ensure_system_prompt(self, conv: Dict[str, Any], system_prompt: str | None) -> None:
@@ -765,189 +787,227 @@ class YabotGraph:
                 self.tracer.log("response_final", {"responses": responses}, context=trace_ctx)
             return responses, new_messages, None, tool_notices
 
-    async def _process_input(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        incoming = (state.get("incoming") or "").strip()
-        responses: List[str] = []
-        ensure_state(state, self.default_model)
+    def _trace_ctx(self, state: Dict[str, Any], agent: str, conv_id: str | None, model: str) -> dict[str, Any]:
         trace_ctx = dict(state.get("trace") or {})
+        if conv_id:
+            trace_ctx.update({"conv_id": conv_id, "model": model, "agent": agent})
+        return trace_ctx
 
+    def _route_choice(self, state: Dict[str, Any]) -> str:
+        return state.get("route") or "chat"
+
+    def _plan_choice(self, state: Dict[str, Any]) -> str:
+        return "plan" if state.get("plan_steps") else "chat"
+
+    async def _route_input(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        incoming = (state.get("incoming") or "").strip()
+        ensure_state(state, self.default_model)
         active_agent = state.get("active_agent", "meta")
         conv_id, conv = room_active_conv(state)
         model = conv.get("model", self.default_model)
         agents_loaded = conv.setdefault("agents_loaded", [])
-        trace_ctx.update({"conv_id": conv_id, "model": model, "agent": active_agent})
         self._ensure_system_prompt(conv, self._system_prompt_for_agent(active_agent))
         conv_messages = conv.get("messages", [])
         self._inject_agents_messages(agents_loaded, conv_messages, [Path(os.getcwd())])
         conv["messages"] = conv_messages
 
+        trace_ctx = self._trace_ctx(state, active_agent, conv_id, model)
         if self.tracer:
             self.tracer.log("incoming", {"text": incoming}, context=trace_ctx)
 
-        pending = state["approvals"].get("pending")
-        if pending:
-            pending_agent = pending.get("agent", active_agent)
-            pending_tools = self._tools_for_agent(pending_agent)
-            pending_prompt = self._system_prompt_for_agent(pending_agent)
-            pending_trace = dict(trace_ctx)
-            request = pending.get("request") or {}
-            if request.get("kind") == "ask_user":
-                tool_call_id = request.get("tool_call_id", "")
-                assistant_message = pending.get("assistant")
-                tool_message = {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": incoming,
-                }
-                state["approvals"]["pending"] = None
-                conv_id, conv = agent_active_conv(state, pending_agent)
-                model = conv.get("model", self.default_model)
-                agents_loaded = conv.setdefault("agents_loaded", [])
-                self._ensure_system_prompt(conv, pending_prompt)
-                pending_trace.update({"conv_id": conv_id, "model": model, "agent": pending_agent})
-                base_messages = list(conv.get("messages", []))
-                if assistant_message:
-                    base_messages.append(assistant_message)
-                base_messages.append(tool_message)
-                responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
-                    state,
-                    model,
-                    base_messages,
-                    pending_trace,
-                    agents_loaded,
-                    pending_agent,
-                    pending_tools,
-                )
-                if tool_notices:
-                    responses = tool_notices + responses
-                if pending_next:
-                    state["approvals"]["pending"] = pending_next
-                elif new_messages is not None:
-                    conv_messages = list(conv.get("messages", []))
-                    if assistant_message:
-                        conv_messages.append(assistant_message)
-                    conv_messages.append(tool_message)
-                    conv_messages.extend(new_messages)
-                    conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
-            elif incoming.strip().lower() == "y":
-                if request.get("kind") == "shell":
-                    self._approve_shell(state, request.get("command", ""), request.get("workdir"))
-                elif request.get("kind") == "dir":
-                    self._approve_dir(state, request.get("dir", ""))
-
-                if self.tracer:
-                    self.tracer.log("approval_response", {"request": request, "approved": True}, context=pending_trace)
-                state["approvals"]["pending"] = None
-                conv_id, conv = agent_active_conv(state, pending_agent)
-                model = conv.get("model", self.default_model)
-                agents_loaded = conv.setdefault("agents_loaded", [])
-                self._ensure_system_prompt(conv, pending_prompt)
-                pending_trace.update({"conv_id": conv_id, "model": model, "agent": pending_agent})
-                responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
-                    state,
-                    model,
-                    conv.get("messages", []),
-                    pending_trace,
-                    agents_loaded,
-                    pending_agent,
-                    pending_tools,
-                    initial_tool_calls=pending.get("tool_calls"),
-                    initial_assistant=pending.get("assistant"),
-                )
-                if tool_notices:
-                    responses = tool_notices + responses
-                if pending_next:
-                    state["approvals"]["pending"] = pending_next
-                elif new_messages is not None:
-                    conv_messages = conv.get("messages", [])
-                    conv_messages.extend(new_messages)
-                    conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
-            else:
-                if self.tracer:
-                    self.tracer.log(
-                        "approval_response",
-                        {"request": request, "approved": False, "feedback": incoming},
-                        context=pending_trace,
-                    )
-                state["approvals"]["pending"] = None
-                conv_id, conv = agent_active_conv(state, pending_agent)
-                model = conv.get("model", self.default_model)
-                agents_loaded = conv.setdefault("agents_loaded", [])
-                self._ensure_system_prompt(conv, pending_prompt)
-                pending_trace.update({"conv_id": conv_id, "model": model, "agent": pending_agent})
-                base_messages = list(conv.get("messages", []))
-                assistant_message = pending.get("assistant")
-                stripped = self._assistant_without_tool_calls(assistant_message)
-                if stripped:
-                    base_messages.append(stripped)
-                base_messages.append(
-                    {
-                        "role": "user",
-                        "content": f"Approval denied. Feedback: {incoming}",
-                    }
-                )
-                responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
-                    state,
-                    model,
-                    base_messages,
-                    trace_ctx,
-                    agents_loaded,
-                    pending_agent,
-                    pending_tools,
-                )
-                if tool_notices:
-                    responses = tool_notices + responses
-                if pending_next:
-                    state["approvals"]["pending"] = pending_next
-                elif new_messages is not None:
-                    conv_messages = list(conv.get("messages", []))
-                    stripped = self._assistant_without_tool_calls(assistant_message)
-                    if stripped:
-                        conv_messages.append(stripped)
-                    conv_messages.append(base_messages[-1])
-                    conv_messages.extend(new_messages)
-                    conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
-
-            state["responses"] = responses
-            if pending_next is None and state.get("plan_steps"):
-                state["plan_index"] = int(state.get("plan_index", 0)) + 1
-                follow_responses, follow_pending = await self._run_plan_steps(
-                    state,
-                    model,
-                    conv,
-                    trace_ctx,
-                    agents_loaded,
-                    pending_agent,
-                    pending_tools,
-                )
-                responses.extend(follow_responses)
-                if follow_pending:
-                    state["responses"] = responses
-                    return state
-            state["responses"] = responses
+        state["command"] = {}
+        if state.get("approvals", {}).get("pending"):
+            state["route"] = "pending"
             return state
 
         parsed = parse_command(incoming)
         if parsed:
             cmd, arg = parsed
-            if self.tracer:
-                self.tracer.log("command", {"command": cmd, "arg": arg}, context=trace_ctx)
-            before_agent = active_agent
-            responses = [handle_command(state, cmd, arg, self.available_models, self.default_model)]
-            if cmd == "become":
-                after_agent = state.get("active_agent", before_agent)
-                trace_ctx["agent"] = after_agent
-                if self.tracer:
-                    self.tracer.log(
-                        "agent_switch",
-                        {"from": before_agent, "to": after_agent},
-                        context=trace_ctx,
-                    )
-            state["responses"] = responses
+            state["command"] = {"cmd": cmd, "arg": arg}
+            state["route"] = "command"
             return state
 
-        _, conv = room_active_conv(state)
+        state["route"] = "chat"
+        return state
+
+    async def _handle_pending(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        incoming = (state.get("incoming") or "").strip()
+        responses: List[str] = []
+        active_agent = state.get("active_agent", "meta")
+
+        pending = state.get("approvals", {}).get("pending")
+        if not pending:
+            state["responses"] = []
+            return state
+
+        pending_agent = pending.get("agent", active_agent)
+        pending_tools = self._tools_for_agent(pending_agent)
+        pending_prompt = self._system_prompt_for_agent(pending_agent)
+        request = pending.get("request") or {}
+        pending_next: dict[str, Any] | None = None
+
+        conv_id, conv = agent_active_conv(state, pending_agent)
         model = conv.get("model", self.default_model)
+        agents_loaded = conv.setdefault("agents_loaded", [])
+        self._ensure_system_prompt(conv, pending_prompt)
+        conv_messages = conv.get("messages", [])
+        self._inject_agents_messages(agents_loaded, conv_messages, [Path(os.getcwd())])
+        conv["messages"] = conv_messages
+        pending_trace = self._trace_ctx(state, pending_agent, conv_id, model)
+
+        if request.get("kind") == "ask_user":
+            tool_call_id = request.get("tool_call_id", "")
+            assistant_message = pending.get("assistant")
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": incoming,
+            }
+            state["approvals"]["pending"] = None
+            base_messages = list(conv.get("messages", []))
+            if assistant_message:
+                base_messages.append(assistant_message)
+            base_messages.append(tool_message)
+            responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
+                state,
+                model,
+                base_messages,
+                pending_trace,
+                agents_loaded,
+                pending_agent,
+                pending_tools,
+            )
+            if tool_notices:
+                responses = tool_notices + responses
+            if pending_next:
+                state["approvals"]["pending"] = pending_next
+            elif new_messages is not None:
+                conv_messages = list(conv.get("messages", []))
+                if assistant_message:
+                    conv_messages.append(assistant_message)
+                conv_messages.append(tool_message)
+                conv_messages.extend(new_messages)
+                conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+        elif incoming.strip().lower() == "y":
+            if request.get("kind") == "shell":
+                self._approve_shell(state, request.get("command", ""), request.get("workdir"))
+            elif request.get("kind") == "dir":
+                self._approve_dir(state, request.get("dir", ""))
+
+            if self.tracer:
+                self.tracer.log("approval_response", {"request": request, "approved": True}, context=pending_trace)
+            state["approvals"]["pending"] = None
+            responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
+                state,
+                model,
+                conv.get("messages", []),
+                pending_trace,
+                agents_loaded,
+                pending_agent,
+                pending_tools,
+                initial_tool_calls=pending.get("tool_calls"),
+                initial_assistant=pending.get("assistant"),
+            )
+            if tool_notices:
+                responses = tool_notices + responses
+            if pending_next:
+                state["approvals"]["pending"] = pending_next
+            elif new_messages is not None:
+                conv_messages = conv.get("messages", [])
+                conv_messages.extend(new_messages)
+                conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+        else:
+            if self.tracer:
+                self.tracer.log(
+                    "approval_response",
+                    {"request": request, "approved": False, "feedback": incoming},
+                    context=pending_trace,
+                )
+            state["approvals"]["pending"] = None
+            base_messages = list(conv.get("messages", []))
+            assistant_message = pending.get("assistant")
+            stripped = self._assistant_without_tool_calls(assistant_message)
+            if stripped:
+                base_messages.append(stripped)
+            base_messages.append(
+                {
+                    "role": "user",
+                    "content": f"Approval denied. Feedback: {incoming}",
+                }
+            )
+            responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
+                state,
+                model,
+                base_messages,
+                pending_trace,
+                agents_loaded,
+                pending_agent,
+                pending_tools,
+            )
+            if tool_notices:
+                responses = tool_notices + responses
+            if pending_next:
+                state["approvals"]["pending"] = pending_next
+            elif new_messages is not None:
+                conv_messages = list(conv.get("messages", []))
+                stripped = self._assistant_without_tool_calls(assistant_message)
+                if stripped:
+                    conv_messages.append(stripped)
+                conv_messages.append(base_messages[-1])
+                conv_messages.extend(new_messages)
+                conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+
+        state["responses"] = responses
+        if pending_next is None and state.get("plan_steps"):
+            state["plan_index"] = int(state.get("plan_index", 0)) + 1
+            follow_responses, follow_pending = await self._run_plan_steps(
+                state,
+                model,
+                conv,
+                pending_trace,
+                agents_loaded,
+                pending_agent,
+                pending_tools,
+            )
+            responses.extend(follow_responses)
+            if follow_pending:
+                state["responses"] = responses
+                return state
+        state["responses"] = responses
+        return state
+
+    def _handle_command(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        command = state.get("command") or {}
+        cmd = command.get("cmd") or ""
+        arg = command.get("arg") or ""
+        active_agent = state.get("active_agent", "meta")
+        conv_id, conv = room_active_conv(state)
+        model = conv.get("model", self.default_model)
+        trace_ctx = self._trace_ctx(state, active_agent, conv_id, model)
+
+        if self.tracer:
+            self.tracer.log("command", {"command": cmd, "arg": arg}, context=trace_ctx)
+        before_agent = active_agent
+        responses = [handle_command(state, cmd, arg, self.available_models, self.default_model)]
+        if cmd == "become":
+            after_agent = state.get("active_agent", before_agent)
+            trace_ctx["agent"] = after_agent
+            if self.tracer:
+                self.tracer.log(
+                    "agent_switch",
+                    {"from": before_agent, "to": after_agent},
+                    context=trace_ctx,
+                )
+        state["responses"] = responses
+        return state
+
+    async def _prepare_chat(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        incoming = (state.get("incoming") or "").strip()
+        active_agent = state.get("active_agent", "meta")
+        conv_id, conv = room_active_conv(state)
+        model = conv.get("model", self.default_model)
+        trace_ctx = self._trace_ctx(state, active_agent, conv_id, model)
+
         conv_messages = conv.get("messages", [])
         conv_messages.append({"role": "user", "content": incoming})
         conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
@@ -966,39 +1026,64 @@ class YabotGraph:
                 stream_callback = self._stream_callback.get()
                 if stream_callback:
                     await stream_callback("[system] Plan:\n- " + "\n- ".join(plan_steps) + "\n")
+        return state
 
-        if plan_steps:
-            tools = self._tools_for_agent(active_agent)
-            responses, pending_next = await self._run_plan_steps(
-                state, model, conv, trace_ctx, agents_loaded, active_agent, tools, 0
-            )
-            if pending_next:
-                state["responses"] = responses
-                return state
-        else:
-            tools = self._tools_for_agent(active_agent)
-            responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
-                state,
-                model,
-                conv.get("messages", []),
-                trace_ctx,
-                agents_loaded,
-                active_agent,
-                tools,
-            )
-            if tool_notices:
-                responses = tool_notices + responses
-            if pending_next:
-                state["approvals"]["pending"] = pending_next
-            elif new_messages is not None:
-                conv_messages = conv.get("messages", [])
-                conv_messages.extend(new_messages)
-                conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+    async def _run_plan_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        active_agent = state.get("active_agent", "meta")
+        conv_id, conv = room_active_conv(state)
+        model = conv.get("model", self.default_model)
+        agents_loaded = conv.setdefault("agents_loaded", [])
+        trace_ctx = self._trace_ctx(state, active_agent, conv_id, model)
+        tools = self._tools_for_agent(active_agent)
 
+        start_index = int(state.get("plan_index", 0))
+        responses, pending_next = await self._run_plan_steps(
+            state, model, conv, trace_ctx, agents_loaded, active_agent, tools, start_index
+        )
+        if pending_next:
+            state["responses"] = responses
+            return state
+
+        plan_steps = state.get("plan") or []
         if plan_steps and not self._stream_callback.get():
             responses = ["Plan:\n- " + "\n- ".join(plan_steps)] + responses
-
         state["responses"] = responses
-        if self.tracer:
-            self.tracer.log("invoke_result", {"responses": responses}, context=trace_ctx)
+        return state
+
+    async def _run_llm_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        active_agent = state.get("active_agent", "meta")
+        conv_id, conv = room_active_conv(state)
+        model = conv.get("model", self.default_model)
+        agents_loaded = conv.setdefault("agents_loaded", [])
+        trace_ctx = self._trace_ctx(state, active_agent, conv_id, model)
+        tools = self._tools_for_agent(active_agent)
+
+        responses, new_messages, pending_next, tool_notices = await self._run_llm_loop(
+            state,
+            model,
+            conv.get("messages", []),
+            trace_ctx,
+            agents_loaded,
+            active_agent,
+            tools,
+        )
+        if tool_notices:
+            responses = tool_notices + responses
+        if pending_next:
+            state["approvals"]["pending"] = pending_next
+        elif new_messages is not None:
+            conv_messages = conv.get("messages", [])
+            conv_messages.extend(new_messages)
+            conv["messages"] = trim_messages(conv_messages, model, self.max_turns)
+        state["responses"] = responses
+        return state
+
+    def _finalize(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        route = state.get("route")
+        if route == "chat" and self.tracer:
+            active_agent = state.get("active_agent", "meta")
+            conv_id, conv = room_active_conv(state)
+            model = conv.get("model", self.default_model)
+            trace_ctx = self._trace_ctx(state, active_agent, conv_id, model)
+            self.tracer.log("invoke_result", {"responses": state.get("responses", [])}, context=trace_ctx)
         return state
