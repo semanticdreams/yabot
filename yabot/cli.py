@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, TextIO
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -150,13 +151,14 @@ class YabotCLI:
         streamed = False
         ended_with_newline = False
         stream_chunks: list[str] = []
+        stream_written = 0
 
         async def on_token(chunk: str) -> None:
-            nonlocal streamed, ended_with_newline
+            nonlocal streamed, ended_with_newline, stream_written
             streamed = True
             ended_with_newline = chunk.endswith("\n")
             stream_chunks.append(chunk)
-            await self._write_llm(chunk)
+            stream_written += await self._write_llm(chunk)
 
         graph_task = asyncio.create_task(self._call_graph(text, on_token))
         self.streams.register(self.room_id, graph_task)
@@ -182,7 +184,9 @@ class YabotCLI:
                     and not line.startswith("Approve ")
                 ]
                 expected_text = "\n".join(expected_lines).strip()
-                if expected_text and expected_text != streamed_text:
+                if expected_text and (
+                    expected_text != streamed_text or stream_written < len(streamed_text)
+                ):
                     await self._print("[system] Output corrected from final response.")
                     await self._print(expected_text)
             if not streamed:
@@ -219,17 +223,24 @@ class YabotCLI:
     async def _print(self, text: str) -> None:
         async with self._print_lock:
             if self._pt_session is not None:
-                print_formatted_text(self._format_text(text), output=self._pt_session.output)
+                await run_in_terminal(
+                    lambda: print_formatted_text(self._format_text(text), output=self._pt_session.output)
+                )
             else:
                 print(text, file=self.output, flush=True)
 
-    async def _write_llm(self, text: str) -> None:
+    async def _write_llm(self, text: str) -> int:
         async with self._print_lock:
             if self._pt_session is not None:
-                print_formatted_text(self._format_llm(text), output=self._pt_session.output, end="", flush=True)
+                await run_in_terminal(
+                    lambda: print_formatted_text(
+                        self._format_llm(text), output=self._pt_session.output, end="", flush=True
+                    )
+                )
             else:
                 self.output.write(text)
                 self.output.flush()
+        return len(text)
 
     def _format_llm(self, text: str) -> HTML:
         escaped = html.escape(text)

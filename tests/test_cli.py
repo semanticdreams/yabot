@@ -72,6 +72,54 @@ class DummyLLM:
         raise AssertionError("LLM should not be called for commands.")
 
 
+class StreamGraphLong:
+    async def ainvoke_stream(self, room_id: str, text: str, on_token):
+        content = "I manage and facilitate interactions with other agents for you."
+        for chunk in ["I manage and ", "facilitate interactions ", "with other agents for you."]:
+            await on_token(chunk)
+        return {"responses": [content]}
+
+
+class DroppingCLI(YabotCLI):
+    async def _write_llm(self, text: str) -> int:
+        dropped = text.replace(" ", "")
+        if self._pt_session is not None:
+            self._pt_session.output.write(dropped)
+            self._pt_session.output.flush()
+        else:
+            self.output.write(dropped)
+            self.output.flush()
+        return len(dropped)
+
+
+@pytest.mark.asyncio
+async def test_cli_prompt_toolkit_writes_via_run_in_terminal(monkeypatch):
+    output = io.StringIO()
+    cli = YabotCLI(graph=StreamGraphMatch(), input_fn=DummyInput(["go"]), output=output)
+
+    calls: list[object] = []
+
+    async def fake_run_in_terminal(fn):
+        calls.append(fn)
+        return fn()
+
+    def fake_print_formatted_text(*_args, **_kwargs):
+        return None
+
+    class DummySession:
+        def __init__(self):
+            self.output = io.StringIO()
+
+    monkeypatch.setattr("yabot.cli.run_in_terminal", fake_run_in_terminal)
+    monkeypatch.setattr("yabot.cli.print_formatted_text", fake_print_formatted_text)
+    cli._pt_session = DummySession()
+
+    await cli._print("hi")
+    await cli._write_llm("hello")
+
+    assert len(calls) == 2
+
+
 @pytest.mark.asyncio
 async def test_cli_prints_response():
     graph = DummyGraph()
@@ -154,3 +202,15 @@ async def test_cli_does_not_correct_when_stream_matches():
 
     out_text = output.getvalue()
     assert "Output corrected from final response." not in out_text
+
+
+@pytest.mark.asyncio
+async def test_cli_corrects_when_stream_display_drops_chars():
+    output = io.StringIO()
+    cli = DroppingCLI(graph=StreamGraphLong(), input_fn=DummyInput(["go"]), output=output)
+
+    await cli.run_async()
+
+    out_text = output.getvalue()
+    assert "Output corrected from final response." in out_text
+    assert "I manage and facilitate interactions with other agents for you." in out_text
